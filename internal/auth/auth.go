@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -13,14 +14,23 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"kyrecovery-server/internal/crypto"
 	"kyrecovery-server/internal/db"
 )
 
 const (
 	SessionCookieName = "kyrecovery_session"
 	SessionDuration   = 24 * time.Hour
+
+	SettingSSOEnabled      = "sso.enabled"
+	SettingSSOIssuerURL    = "sso.issuer_url"
+	SettingSSOClientID     = "sso.client_id"
+	SettingSSOClientSecret = "sso.client_secret"
+	SettingSSORedirectURL  = "sso.redirect_url"
+	SettingSSOAdminEmail   = "sso.admin_email"
 )
 
 // OIDCConfig holds settings for KySignOn OpenID Connect authentication.
@@ -28,7 +38,7 @@ type OIDCConfig struct {
 	Enabled      bool   `json:"enabled"`
 	IssuerURL    string `json:"issuer_url"`
 	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	ClientSecret string `json:"client_secret,omitempty"`
 	RedirectURL  string `json:"redirect_url"`
 	AdminEmail   string `json:"admin_email"`
 }
@@ -41,23 +51,253 @@ type UserInfo struct {
 	Role    string `json:"role"` // "admin", "operator", "viewer"
 }
 
-// Manager handles OIDC login flows, PKCE challenges, token exchange, and sessions.
+// Manager handles OIDC login flows, PKCE challenges, local admin auth, and sessions.
 type Manager struct {
+	mu  sync.RWMutex
 	cfg OIDCConfig
 	db  *db.DB
 }
 
 // NewManager creates a new authentication manager.
 func NewManager(cfg OIDCConfig, database *db.DB) *Manager {
-	return &Manager{
+	m := &Manager{
 		cfg: cfg,
 		db:  database,
 	}
+	m.loadSettingsFromDB(context.Background())
+	return m
 }
 
-// IsEnabled returns true if SSO authentication is enabled.
+// loadSettingsFromDB loads saved SSO configurations from DB if available.
+func (m *Manager) loadSettingsFromDB(ctx context.Context) {
+	if m.db == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if enabled, err := m.db.GetSetting(ctx, SettingSSOEnabled); err == nil && enabled != "" {
+		m.cfg.Enabled = enabled == "true" || enabled == "1"
+	}
+	if issuer, err := m.db.GetSetting(ctx, SettingSSOIssuerURL); err == nil && issuer != "" {
+		m.cfg.IssuerURL = issuer
+	}
+	if clientID, err := m.db.GetSetting(ctx, SettingSSOClientID); err == nil && clientID != "" {
+		m.cfg.ClientID = clientID
+	}
+	if clientSecret, err := m.db.GetSetting(ctx, SettingSSOClientSecret); err == nil && clientSecret != "" {
+		m.cfg.ClientSecret = clientSecret
+	}
+	if redirectURL, err := m.db.GetSetting(ctx, SettingSSORedirectURL); err == nil && redirectURL != "" {
+		m.cfg.RedirectURL = redirectURL
+	}
+	if adminEmail, err := m.db.GetSetting(ctx, SettingSSOAdminEmail); err == nil && adminEmail != "" {
+		m.cfg.AdminEmail = adminEmail
+	}
+}
+
+// GetConfig returns the current OIDC SSO configuration.
+func (m *Manager) GetConfig() OIDCConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg
+}
+
+// SaveConfig persists updated SSO configuration to SQLite and updates manager memory.
+func (m *Manager) SaveConfig(ctx context.Context, cfg OIDCConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	enabledStr := "false"
+	if cfg.Enabled {
+		enabledStr = "true"
+	}
+
+	if err := m.db.SetSetting(ctx, SettingSSOEnabled, enabledStr); err != nil {
+		return err
+	}
+	if err := m.db.SetSetting(ctx, SettingSSOIssuerURL, cfg.IssuerURL); err != nil {
+		return err
+	}
+	if err := m.db.SetSetting(ctx, SettingSSOClientID, cfg.ClientID); err != nil {
+		return err
+	}
+	if cfg.ClientSecret != "" && cfg.ClientSecret != "••••••••" {
+		if err := m.db.SetSetting(ctx, SettingSSOClientSecret, cfg.ClientSecret); err != nil {
+			return err
+		}
+		m.cfg.ClientSecret = cfg.ClientSecret
+	}
+	if err := m.db.SetSetting(ctx, SettingSSORedirectURL, cfg.RedirectURL); err != nil {
+		return err
+	}
+	if err := m.db.SetSetting(ctx, SettingSSOAdminEmail, cfg.AdminEmail); err != nil {
+		return err
+	}
+
+	m.cfg.Enabled = cfg.Enabled
+	m.cfg.IssuerURL = cfg.IssuerURL
+	m.cfg.ClientID = cfg.ClientID
+	m.cfg.RedirectURL = cfg.RedirectURL
+	m.cfg.AdminEmail = cfg.AdminEmail
+	return nil
+}
+
+// IsEnabled returns true if SSO authentication is enabled and configured.
 func (m *Manager) IsEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.cfg.Enabled && m.cfg.IssuerURL != "" && m.cfg.ClientID != ""
+}
+
+// HashPassword generates an Argon2id hash and salt for a password.
+func HashPassword(password string) (hashHex, saltHex string, err error) {
+	salt, err := crypto.GenerateRandomBytes(16)
+	if err != nil {
+		return "", "", err
+	}
+	key, err := crypto.DeriveKeyFromPassphrase(password, salt)
+	if err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(key), hex.EncodeToString(salt), nil
+}
+
+// VerifyPassword validates a plaintext password against an Argon2id hash and salt.
+func VerifyPassword(password, hashHex, saltHex string) bool {
+	salt, err := hex.DecodeString(saltHex)
+	if err != nil || len(salt) == 0 {
+		return false
+	}
+	expectedKey, err := hex.DecodeString(hashHex)
+	if err != nil || len(expectedKey) != crypto.KeyLength {
+		return false
+	}
+	derivedKey, err := crypto.DeriveKeyFromPassphrase(password, salt)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(derivedKey, expectedKey) == 1
+}
+
+// GenerateRandomPassword creates a strong random password for first-time admin setup.
+func GenerateRandomPassword(length int) (string, error) {
+	if length < 12 {
+		length = 16
+	}
+	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*+"
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	for i := range bytes {
+		bytes[i] = charset[int(bytes[i])%len(charset)]
+	}
+	return string(bytes), nil
+}
+
+// EnsureAdminUser ensures an admin account exists, generating random credentials on first run.
+func (m *Manager) EnsureAdminUser(ctx context.Context, initialPass string) (password string, isNew bool, err error) {
+	existing, err := m.db.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		return "", false, err
+	}
+	if existing != nil {
+		return "", false, nil
+	}
+
+	pass := initialPass
+	if pass == "" {
+		pass, err = GenerateRandomPassword(16)
+		if err != nil {
+			return "", false, err
+		}
+	}
+
+	hashHex, saltHex, err := HashPassword(pass)
+	if err != nil {
+		return "", false, fmt.Errorf("failed hashing admin password: %w", err)
+	}
+
+	now := time.Now().UTC()
+	adminUser := db.UserRecord{
+		ID:           "usr-admin-001",
+		Username:     "admin",
+		PasswordHash: hashHex,
+		Salt:         saltHex,
+		Email:        "admin@kyrecovery.local",
+		Name:         "System Administrator",
+		Role:         "admin",
+		CreatedAt:    now,
+	}
+
+	if err := m.db.InsertUser(ctx, adminUser); err != nil {
+		return "", false, fmt.Errorf("failed creating admin user: %w", err)
+	}
+
+	return pass, true, nil
+}
+
+// AuthenticateLocal validates local username and password and returns UserInfo.
+func (m *Manager) AuthenticateLocal(ctx context.Context, username, password string) (*UserInfo, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || password == "" {
+		return nil, errors.New("username and password are required")
+	}
+
+	user, err := m.db.GetUserByUsername(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("database query error: %w", err)
+	}
+	if user == nil {
+		return nil, errors.New("invalid username or password")
+	}
+
+	if !VerifyPassword(password, user.PasswordHash, user.Salt) {
+		return nil, errors.New("invalid username or password")
+	}
+
+	return &UserInfo{
+		Subject: user.ID,
+		Email:   user.Email,
+		Name:    user.Name,
+		Role:    user.Role,
+	}, nil
+}
+
+// TestSSOConnection checks if the KySignOn OIDC discovery endpoint is reachable.
+func (m *Manager) TestSSOConnection(ctx context.Context, issuerURL string) error {
+	issuerURL = strings.TrimRight(strings.TrimSpace(issuerURL), "/")
+	if issuerURL == "" {
+		return errors.New("issuer URL is required")
+	}
+
+	discoveryURL := fmt.Sprintf("%s/.well-known/openid-configuration", issuerURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Fallback: ping root or authorize endpoint
+		authReq, err2 := http.NewRequestWithContext(ctx, http.MethodGet, issuerURL, nil)
+		if err2 == nil {
+			if r2, err3 := client.Do(authReq); err3 == nil {
+				defer r2.Body.Close()
+				return nil
+			}
+		}
+		return fmt.Errorf("could not connect to KySignOn issuer at %s: %w", issuerURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("issuer returned HTTP %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 // GeneratePKCE creates a cryptographic code verifier and S256 code challenge.
@@ -265,13 +505,18 @@ func (m *Manager) CreateSession(ctx context.Context, u *UserInfo) (*http.Cookie,
 	return cookie, nil
 }
 
-// GetSession retrieves the current session from request cookie.
+// GetSession retrieves the current session from request cookie or Authorization header.
 func (m *Manager) GetSession(ctx context.Context, r *http.Request) (*db.SessionRecord, error) {
-	cookie, err := r.Cookie(SessionCookieName)
-	if err != nil || cookie.Value == "" {
+	sessionID := ""
+	if cookie, err := r.Cookie(SessionCookieName); err == nil && cookie.Value != "" {
+		sessionID = cookie.Value
+	} else if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		sessionID = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	if sessionID == "" {
 		return nil, nil
 	}
-	return m.db.GetSession(ctx, cookie.Value)
+	return m.db.GetSession(ctx, sessionID)
 }
 
 // InvalidateSession deletes the current session and clears the cookie.

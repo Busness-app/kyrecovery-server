@@ -442,38 +442,127 @@ function closePairingDisplayModal() {
   document.getElementById('pairing-code-display-modal').classList.remove('open');
 }
 
-// 7. Authentication State Management
+// 7. Authentication State Management & SSO Gateway
 let currentUser = null;
-let ssoEnabled = false;
+let ssoConfig = null;
 
 async function loadAuthUser() {
   try {
-    const res = await fetch('/api/auth/me');
-    if (!res.ok) return;
-    const data = await res.json();
-    ssoEnabled = data.sso_enabled;
+    const [meRes, ssoRes] = await Promise.all([
+      fetch('/api/auth/me'),
+      fetch('/api/auth/sso/config')
+    ]);
+
+    const data = meRes.ok ? await meRes.json() : { authenticated: false };
+    ssoConfig = ssoRes.ok ? await ssoRes.json() : null;
 
     const nameEl = document.getElementById('user-display-name');
     const roleEl = document.getElementById('user-role-badge');
     const btn = document.getElementById('btn-auth-action');
+    const btnSSOPair = document.getElementById('btn-sso-pair-header');
+    const btnChangePass = document.getElementById('btn-change-pass-header');
+    const loginGateway = document.getElementById('login-gateway-view');
+    const dashboardView = document.getElementById('dashboard-view');
+    const ssoBadge = document.getElementById('login-sso-badge');
+    const ssoActiveSection = document.getElementById('sso-active-section');
+    const ssoIssuerLabel = document.getElementById('login-sso-issuer-label');
+
+    // Update SSO Gateway View status
+    if (ssoConfig && ssoConfig.enabled && ssoConfig.issuer_url) {
+      if (ssoBadge) {
+        ssoBadge.className = 'status-pill ready';
+        ssoBadge.innerHTML = '<span class="dot"></span> PAIRED & ACTIVE';
+      }
+      if (ssoActiveSection) ssoActiveSection.style.display = 'block';
+      if (ssoIssuerLabel) ssoIssuerLabel.textContent = ssoConfig.issuer_url;
+    } else {
+      if (ssoBadge) {
+        ssoBadge.className = 'status-pill warning';
+        ssoBadge.innerHTML = '<span class="dot"></span> NOT PAIRED';
+      }
+      if (ssoActiveSection) ssoActiveSection.style.display = 'none';
+    }
 
     if (data.authenticated && data.user) {
       currentUser = data.user;
-      nameEl.textContent = data.user.name || data.user.email;
-      roleEl.textContent = (data.user.role || 'operator').toUpperCase();
-      roleEl.className = `status-pill ${data.user.role === 'admin' ? 'ready' : 'warning'}`;
-      btn.textContent = ssoEnabled ? 'Sign Out' : 'Local Admin';
-      btn.onclick = ssoEnabled ? handleLogout : null;
+      if (nameEl) nameEl.textContent = data.user.name || data.user.email || data.user.username;
+      if (roleEl) {
+        roleEl.textContent = (data.user.role || 'operator').toUpperCase();
+        roleEl.className = `status-pill ${data.user.role === 'admin' ? 'ready' : 'warning'}`;
+      }
+      if (btn) {
+        btn.textContent = 'Sign Out';
+        btn.className = 'btn btn-secondary btn-sm';
+      }
+      if (btnSSOPair) btnSSOPair.style.display = data.user.role === 'admin' ? 'inline-flex' : 'none';
+      if (btnChangePass) btnChangePass.style.display = 'inline-flex';
+
+      if (loginGateway) loginGateway.style.display = 'none';
+      if (dashboardView) dashboardView.style.display = 'block';
+
+      // Load protected dashboard data
+      loadReadiness();
+      loadCapsules();
+      loadPairing();
+      loadCustodians();
+      loadDrills();
+      loadAudit();
+      loadCeremonies();
+      loadReplication();
     } else {
       currentUser = null;
-      nameEl.textContent = 'Unauthenticated';
-      roleEl.textContent = 'GUEST';
-      roleEl.className = 'status-pill danger';
-      btn.textContent = 'Sign In (KySignOn)';
-      btn.onclick = handleLogin;
+      if (nameEl) nameEl.textContent = 'Unauthenticated';
+      if (roleEl) {
+        roleEl.textContent = 'GUEST';
+        roleEl.className = 'status-pill danger';
+      }
+      if (btn) {
+        btn.textContent = 'Sign In';
+        btn.className = 'btn btn-primary btn-sm';
+      }
+      if (btnSSOPair) btnSSOPair.style.display = 'none';
+      if (btnChangePass) btnChangePass.style.display = 'none';
+
+      if (loginGateway) loginGateway.style.display = 'block';
+      if (dashboardView) dashboardView.style.display = 'none';
     }
   } catch (err) {
     console.error('Error fetching auth user:', err);
+  }
+}
+
+async function submitLocalLogin(e) {
+  e.preventDefault();
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errBox = document.getElementById('login-error-box');
+  const btn = document.getElementById('btn-local-login-submit');
+
+  errBox.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Verifying credentials...';
+
+  try {
+    const res = await fetch('/api/auth/login/local', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Authentication failed');
+    }
+
+    // Success
+    document.getElementById('login-password').value = '';
+    await loadAuthUser();
+  } catch (err) {
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign In as Local Admin';
   }
 }
 
@@ -484,17 +573,157 @@ function handleLogin() {
 async function handleLogout() {
   try {
     await fetch('/api/auth/logout', { method: 'POST' });
-    window.location.href = '/';
+    currentUser = null;
+    await loadAuthUser();
   } catch (err) {
     console.error('Logout error:', err);
   }
 }
 
 function handleAuthAction() {
-  if (currentUser && ssoEnabled) {
+  if (currentUser) {
     handleLogout();
   } else {
-    handleLogin();
+    const loginGateway = document.getElementById('login-gateway-view');
+    if (loginGateway) {
+      loginGateway.scrollIntoView({ behavior: 'smooth' });
+      document.getElementById('login-password').focus();
+    }
+  }
+}
+
+// 7b. SSO Pairing & Config Modal
+async function openSSOConfigModal() {
+  const statusBox = document.getElementById('sso-test-status');
+  if (statusBox) statusBox.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/auth/sso/config');
+    if (res.ok) {
+      const cfg = await res.json();
+      document.getElementById('sso-enabled-check').checked = !!cfg.enabled;
+      document.getElementById('sso-issuer-input').value = cfg.issuer_url || '';
+      document.getElementById('sso-client-id-input').value = cfg.client_id || 'kyrecovery-server';
+      document.getElementById('sso-client-secret-input').value = cfg.client_secret || '';
+      document.getElementById('sso-redirect-input').value = cfg.redirect_url || (window.location.origin + '/api/auth/callback');
+      document.getElementById('sso-admin-email-input').value = cfg.admin_email || '';
+    }
+  } catch (err) {
+    console.error('Error fetching SSO config:', err);
+  }
+
+  document.getElementById('sso-config-modal').classList.add('open');
+}
+
+function closeSSOConfigModal() {
+  document.getElementById('sso-config-modal').classList.remove('open');
+}
+
+async function testSSOConnection() {
+  const statusBox = document.getElementById('sso-test-status');
+  const issuer = document.getElementById('sso-issuer-input').value.trim();
+
+  if (!issuer) {
+    alert('Please enter a KySignOn Issuer URL to test.');
+    return;
+  }
+
+  statusBox.style.display = 'block';
+  statusBox.style.background = 'var(--bg-input)';
+  statusBox.style.color = 'var(--accent-cyan)';
+  statusBox.textContent = 'Contacting KySignOn authority at ' + issuer + '...';
+
+  try {
+    const res = await fetch('/api/auth/sso/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issuer_url: issuer })
+    });
+    const data = await res.json();
+    if (data.success) {
+      statusBox.style.background = 'var(--accent-green-dim)';
+      statusBox.style.color = 'var(--accent-green)';
+      statusBox.textContent = '✓ ' + data.message;
+    } else {
+      statusBox.style.background = 'var(--accent-red-dim)';
+      statusBox.style.color = 'var(--accent-red)';
+      statusBox.textContent = '✗ ' + (data.error || 'Connection failed');
+    }
+  } catch (err) {
+    statusBox.style.background = 'var(--accent-red-dim)';
+    statusBox.style.color = 'var(--accent-red)';
+    statusBox.textContent = '✗ Network test error: ' + err.message;
+  }
+}
+
+async function submitSSOConfig(e) {
+  e.preventDefault();
+  const payload = {
+    enabled: document.getElementById('sso-enabled-check').checked,
+    issuer_url: document.getElementById('sso-issuer-input').value.trim(),
+    client_id: document.getElementById('sso-client-id-input').value.trim(),
+    client_secret: document.getElementById('sso-client-secret-input').value.trim(),
+    redirect_url: document.getElementById('sso-redirect-input').value.trim(),
+    admin_email: document.getElementById('sso-admin-email-input').value.trim()
+  };
+
+  try {
+    const res = await fetch('/api/auth/sso/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed saving SSO settings');
+
+    closeSSOConfigModal();
+    alert('✓ KySignOn SSO configuration saved successfully!');
+    await loadAuthUser();
+  } catch (err) {
+    alert('SSO Config Error: ' + err.message);
+  }
+}
+
+// 7c. Change Local Password Modal
+function openChangePasswordModal() {
+  document.getElementById('pass-current').value = '';
+  document.getElementById('pass-new').value = '';
+  document.getElementById('pass-confirm').value = '';
+  document.getElementById('change-pass-error').style.display = 'none';
+  document.getElementById('change-password-modal').classList.add('open');
+}
+
+function closeChangePasswordModal() {
+  document.getElementById('change-password-modal').classList.remove('open');
+}
+
+async function submitChangePassword(e) {
+  e.preventDefault();
+  const oldPassword = document.getElementById('pass-current').value;
+  const newPassword = document.getElementById('pass-new').value;
+  const confirmPassword = document.getElementById('pass-confirm').value;
+  const errBox = document.getElementById('change-pass-error');
+
+  if (newPassword !== confirmPassword) {
+    errBox.textContent = 'New password and confirmation do not match.';
+    errBox.style.display = 'block';
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed changing password');
+
+    closeChangePasswordModal();
+    alert('✓ Password updated successfully!');
+  } catch (err) {
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
   }
 }
 

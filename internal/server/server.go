@@ -124,6 +124,10 @@ func (s *Server) routes() {
 	// Auth & SSO Routes
 	s.mux.HandleFunc("/api/auth/config", s.handleAuthConfig)
 	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("/api/auth/login/local", s.handleAuthLoginLocal)
+	s.mux.HandleFunc("/api/auth/password", s.handleAuthPasswordChange)
+	s.mux.HandleFunc("/api/auth/sso/config", s.handleSSOConfig)
+	s.mux.HandleFunc("/api/auth/sso/test", s.handleSSOTest)
 	s.mux.HandleFunc("/api/auth/callback", s.handleAuthCallback)
 	s.mux.HandleFunc("/api/auth/me", s.handleAuthMe)
 	s.mux.HandleFunc("/api/auth/logout", s.handleAuthLogout)
@@ -166,6 +170,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/capsules/timeline", s.handleCapsuleTimeline)
 }
 
+func isPublicPath(p string) bool {
+	switch p {
+	case "/api/auth/config",
+		"/api/auth/me",
+		"/api/auth/login",
+		"/api/auth/login/local",
+		"/api/auth/callback",
+		"/api/auth/logout",
+		"/api/auth/sso/config",
+		"/api/auth/sso/test",
+		"/api/readiness",
+		"/api/pairing/claim",
+		"/api/backup/push",
+		"/api/v1/backup/push":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Security headers
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -175,6 +199,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
+
+		// Authentication enforcement for protected API routes
+		if !isPublicPath(r.URL.Path) {
+			session, err := s.authMgr.GetSession(r.Context(), r)
+			if err != nil || session == nil {
+				writeError(w, http.StatusUnauthorized, "Unauthorized: Authentication required")
+				return
+			}
+		}
 	}
 
 	s.mux.ServeHTTP(w, r)
@@ -818,30 +851,22 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// 15. Auth Config
+// 15. Auth Config (Public status)
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := s.authMgr.GetConfig()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sso_enabled": s.authMgr.IsEnabled(),
-		"issuer_url":  s.cfg.Auth.IssuerURL,
-		"client_id":   s.cfg.Auth.ClientID,
+		"sso_enabled":  s.authMgr.IsEnabled(),
+		"issuer_url":   cfg.IssuerURL,
+		"client_id":    cfg.ClientID,
+		"redirect_url": cfg.RedirectURL,
+		"admin_email":  cfg.AdminEmail,
 	})
 }
 
-// 16. Auth Login (Initiates OIDC PKCE Flow)
+// 16. Auth Login (Initiates KySignOn OIDC PKCE Flow)
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.authMgr.IsEnabled() {
-		// Mock local session when SSO not configured
-		u := &auth.UserInfo{
-			Subject: "usr-local-admin",
-			Email:   "admin@kyrecovery.local",
-			Name:    "System Administrator",
-			Role:    "admin",
-		}
-		cookie, err := s.authMgr.CreateSession(r.Context(), u)
-		if err == nil {
-			http.SetCookie(w, cookie)
-		}
-		http.Redirect(w, r, "/", http.StatusFound)
+		writeError(w, http.StatusBadRequest, "KySignOn SSO is not configured or enabled on this server. Please sign in as Local Admin.")
 		return
 	}
 
@@ -872,6 +897,191 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 	authURL := s.authMgr.BuildAuthURL(state, nonce, challenge)
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// 16b. Local Admin Login
+type localLoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (s *Server) handleAuthLoginLocal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var req localLoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON login payload")
+		return
+	}
+
+	userInfo, err := s.authMgr.AuthenticateLocal(r.Context(), req.Username, req.Password)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	sessionCookie, err := s.authMgr.CreateSession(r.Context(), userInfo)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed creating session")
+		return
+	}
+
+	http.SetCookie(w, sessionCookie)
+
+	_, _ = s.ledger.Record(r.Context(), "user_logged_in_local", userInfo.Email, userInfo.Subject, map[string]interface{}{
+		"username": req.Username,
+		"role":     userInfo.Role,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":        "authenticated",
+		"session_token": sessionCookie.Value,
+		"user":          userInfo,
+	})
+}
+
+// 16c. Change Admin / User Password
+type passwordChangeRequest struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	session, err := s.authMgr.GetSession(r.Context(), r)
+	if err != nil || session == nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	var req passwordChangeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.NewPassword) < 8 {
+		writeError(w, http.StatusBadRequest, "New password must be at least 8 characters long")
+		return
+	}
+
+	// Verify old password
+	user, err := s.db.GetUserByID(r.Context(), session.UserID)
+	if err != nil || user == nil {
+		writeError(w, http.StatusBadRequest, "User account not found")
+		return
+	}
+
+	if !auth.VerifyPassword(req.OldPassword, user.PasswordHash, user.Salt) {
+		writeError(w, http.StatusUnauthorized, "Current password is incorrect")
+		return
+	}
+
+	newHash, newSalt, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed hashing new password")
+		return
+	}
+
+	if err := s.db.UpdateUserPassword(r.Context(), user.ID, newHash, newSalt); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed updating password")
+		return
+	}
+
+	_, _ = s.ledger.Record(r.Context(), "password_changed", user.Email, user.ID, nil)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "password_updated"})
+}
+
+// 16d. SSO Pairing & Config Management (Admin)
+func (s *Server) handleSSOConfig(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	switch r.Method {
+	case http.MethodGet:
+		cfg := s.authMgr.GetConfig()
+		clientSecretMasked := ""
+		if cfg.ClientSecret != "" {
+			clientSecretMasked = "••••••••"
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"enabled":       cfg.Enabled,
+			"issuer_url":    cfg.IssuerURL,
+			"client_id":     cfg.ClientID,
+			"client_secret": clientSecretMasked,
+			"redirect_url":  cfg.RedirectURL,
+			"admin_email":   cfg.AdminEmail,
+		})
+
+	case http.MethodPost:
+		session, err := s.authMgr.GetSession(ctx, r)
+		if err != nil || session == nil || session.Role != "admin" {
+			writeError(w, http.StatusForbidden, "Admin role required to configure SSO settings")
+			return
+		}
+
+		var req auth.OIDCConfig
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid JSON SSO config payload")
+			return
+		}
+
+		if req.RedirectURL == "" && req.IssuerURL != "" {
+			req.RedirectURL = fmt.Sprintf("http://%s/api/auth/callback", r.Host)
+		}
+
+		if err := s.authMgr.SaveConfig(ctx, req); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed saving SSO config: %v", err))
+			return
+		}
+
+		_, _ = s.ledger.Record(ctx, "sso_config_updated", session.Email, "sso_settings", map[string]interface{}{
+			"enabled":    req.Enabled,
+			"issuer_url": req.IssuerURL,
+			"client_id":  req.ClientID,
+		})
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "saved",
+			"config":  s.authMgr.GetConfig(),
+			"enabled": s.authMgr.IsEnabled(),
+		})
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+// 16e. Test KySignOn SSO Endpoint
+type ssoTestRequest struct {
+	IssuerURL string `json:"issuer_url"`
+}
+
+func (s *Server) handleSSOTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var req ssoTestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.IssuerURL == "" {
+		writeError(w, http.StatusBadRequest, "Issuer URL is required")
+		return
+	}
+
+	if err := s.authMgr.TestSSOConnection(r.Context(), req.IssuerURL); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Successfully connected to KySignOn authority at %s", req.IssuerURL),
+	})
 }
 
 // 17. Auth Callback (Handles OIDC Authorization Code)
@@ -909,7 +1119,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "kyrec_pkce", Value: "", Path: "/api/auth/callback", MaxAge: -1})
 	http.SetCookie(w, &http.Cookie{Name: "kyrec_state", Value: "", Path: "/api/auth/callback", MaxAge: -1})
 
-	_, _ = s.ledger.Record(r.Context(), "user_logged_in", userInfo.Email, userInfo.Subject, map[string]interface{}{
+	_, _ = s.ledger.Record(r.Context(), "user_logged_in_sso", userInfo.Email, userInfo.Subject, map[string]interface{}{
 		"name": userInfo.Name,
 		"role": userInfo.Role,
 	})
@@ -919,31 +1129,18 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 // 18. Auth Me (Current User)
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
-	if !s.authMgr.IsEnabled() {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"authenticated": true,
-			"sso_enabled":   false,
-			"user": map[string]interface{}{
-				"email": "admin@kyrecovery.local",
-				"name":  "Administrator (Local Mode)",
-				"role":  "admin",
-			},
-		})
-		return
-	}
-
 	session, err := s.authMgr.GetSession(r.Context(), r)
 	if err != nil || session == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"authenticated": false,
-			"sso_enabled":   true,
+			"sso_enabled":   s.authMgr.IsEnabled(),
 		})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"authenticated": true,
-		"sso_enabled":   true,
+		"sso_enabled":   s.authMgr.IsEnabled(),
 		"user":          session,
 	})
 }

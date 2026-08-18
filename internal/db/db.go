@@ -76,6 +76,18 @@ type PairedAppRecord struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+// UserRecord represents a local user account.
+type UserRecord struct {
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"password_hash"`
+	Salt         string    `json:"salt"`
+	Email        string    `json:"email"`
+	Name         string    `json:"name"`
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 // SessionRecord represents an authenticated user session.
 type SessionRecord struct {
 	ID        string    `json:"id"`
@@ -154,6 +166,23 @@ func (d *DB) Close() error {
 
 func (d *DB) migrate() error {
 	schema := `
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		username TEXT NOT NULL UNIQUE,
+		password_hash TEXT NOT NULL,
+		salt TEXT NOT NULL,
+		email TEXT NOT NULL,
+		name TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'operator',
+		created_at DATETIME NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS system_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+
 	CREATE TABLE IF NOT EXISTS capsules (
 		id TEXT PRIMARY KEY,
 		service_name TEXT NOT NULL,
@@ -251,6 +280,7 @@ func (d *DB) migrate() error {
 		FOREIGN KEY (target_id) REFERENCES replication_targets(id) ON DELETE CASCADE
 	);
 
+	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 	CREATE INDEX IF NOT EXISTS idx_capsules_service ON capsules(service_name);
 	CREATE INDEX IF NOT EXISTS idx_drills_capsule ON drills(capsule_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_events(sequence_num);
@@ -672,3 +702,94 @@ func (d *DB) ListReplicationLogs(ctx context.Context, limit int) ([]ReplicationL
 	}
 	return list, rows.Err()
 }
+
+// InsertUser creates a new local user.
+func (d *DB) InsertUser(ctx context.Context, u UserRecord) error {
+	q := `INSERT INTO users (id, username, password_hash, salt, email, name, role, created_at)
+	      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.conn.ExecContext(ctx, q, u.ID, u.Username, u.PasswordHash, u.Salt, u.Email, u.Name, u.Role, u.CreatedAt.UTC())
+	return err
+}
+
+// GetUserByUsername finds a user by username.
+func (d *DB) GetUserByUsername(ctx context.Context, username string) (*UserRecord, error) {
+	q := `SELECT id, username, password_hash, salt, email, name, role, created_at FROM users WHERE username = ?`
+	row := d.conn.QueryRowContext(ctx, q, username)
+	var u UserRecord
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Salt, &u.Email, &u.Name, &u.Role, &u.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+// GetUserByID finds a user by ID.
+func (d *DB) GetUserByID(ctx context.Context, id string) (*UserRecord, error) {
+	q := `SELECT id, username, password_hash, salt, email, name, role, created_at FROM users WHERE id = ?`
+	row := d.conn.QueryRowContext(ctx, q, id)
+	var u UserRecord
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Salt, &u.Email, &u.Name, &u.Role, &u.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+// UpdateUserPassword updates the password hash and salt for a user.
+func (d *DB) UpdateUserPassword(ctx context.Context, id, passwordHash, salt string) error {
+	q := `UPDATE users SET password_hash = ?, salt = ? WHERE id = ?`
+	_, err := d.conn.ExecContext(ctx, q, passwordHash, salt, id)
+	return err
+}
+
+// CountUsers returns the total count of registered local users.
+func (d *DB) CountUsers(ctx context.Context) (int, error) {
+	q := `SELECT COUNT(*) FROM users`
+	var count int
+	err := d.conn.QueryRowContext(ctx, q).Scan(&count)
+	return count, err
+}
+
+// GetSetting retrieves a system setting value by key.
+func (d *DB) GetSetting(ctx context.Context, key string) (string, error) {
+	q := `SELECT value FROM system_settings WHERE key = ?`
+	var val string
+	err := d.conn.QueryRowContext(ctx, q, key).Scan(&val)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return val, err
+}
+
+// SetSetting saves or updates a system setting value.
+func (d *DB) SetSetting(ctx context.Context, key, value string) error {
+	q := `INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)
+	      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
+	_, err := d.conn.ExecContext(ctx, q, key, value, time.Now().UTC())
+	return err
+}
+
+// GetAllSettings returns all key-value pairs from system_settings.
+func (d *DB) GetAllSettings(ctx context.Context) (map[string]string, error) {
+	q := `SELECT key, value FROM system_settings`
+	rows, err := d.conn.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	settings := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		settings[k] = v
+	}
+	return settings, rows.Err()
+}
+

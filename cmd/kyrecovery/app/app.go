@@ -121,6 +121,21 @@ func cmdServe(args []string) {
 		AdminEmail:   *ssoAdminEmail,
 	}
 
+	authMgr := auth.NewManager(authCfg, database)
+	initPass := os.Getenv("KY_ADMIN_INITIAL_PASSWORD")
+	adminPass, isNew, err := authMgr.EnsureAdminUser(context.Background(), initPass)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed ensuring admin user: %v\n", err)
+	} else if isNew {
+		fmt.Println("================================================================================")
+		fmt.Println("🚀 KyRecovery Server First-Time Startup Initialized")
+		fmt.Println("   Local Administrator Credentials:")
+		fmt.Println("     Username: admin")
+		fmt.Printf("     Password: %s\n", adminPass)
+		fmt.Println("   Save this password securely or pair KySignOn SSO in the dashboard.")
+		fmt.Println("================================================================================")
+	}
+
 	ledger := audit.NewLedger(database)
 	srv, err := server.New(server.Config{
 		Port:         *port,

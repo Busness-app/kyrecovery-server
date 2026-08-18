@@ -21,14 +21,85 @@
       <div id="system-status-pill" class="status-pill warning">
         <span class="dot"></span> LOADING
       </div>
-      <div id="user-auth-area" style="display: flex; align-items: center; gap: 12px;">
-        <span id="user-display-name" style="font-size: 13px; font-weight: 600; color: var(--text-main);">...</span>
-        <span id="user-role-badge" class="status-pill ready" style="font-size: 10px; padding: 2px 8px;">ADMIN</span>
-        <button id="btn-auth-action" class="btn btn-secondary btn-sm" onclick="handleAuthAction()">Sign In</button>
+      <div id="user-auth-area" style="display: flex; align-items: center; gap: 10px;">
+        <span id="user-display-name" style="font-size: 13px; font-weight: 600; color: var(--text-main);">Unauthenticated</span>
+        <span id="user-role-badge" class="status-pill danger" style="font-size: 10px; padding: 2px 8px;">GUEST</span>
+        <button id="btn-sso-pair-header" class="btn btn-secondary btn-sm" onclick="openSSOConfigModal()" style="display: none;">⚙️ SSO Pairing</button>
+        <button id="btn-change-pass-header" class="btn btn-secondary btn-sm" onclick="openChangePasswordModal()" style="display: none;">🔒 Password</button>
+        <button id="btn-auth-action" class="btn btn-primary btn-sm" onclick="handleAuthAction()">Sign In</button>
       </div>
     </div>
   </header>
 
+  <!-- Login & SSO Gateway View (Displayed When Unauthenticated) -->
+  <div id="login-gateway-view" style="display: none; max-width: 900px; margin: 40px auto; padding: 0 20px; width: 100%;">
+    <div style="text-align: center; margin-bottom: 30px;">
+      <div style="display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; background: var(--accent-cyan); border-radius: 10px; color: var(--bg-main); font-size: 26px; font-weight: 800; margin-bottom: 12px;">⚡</div>
+      <h2 style="font-size: 24px; color: #fff; font-weight: 700;">KyRecovery Security Access Portal</h2>
+      <p style="color: var(--text-muted); font-size: 14px; margin-top: 6px;">Sign in with your Local Administrator credentials or connect through KySignOn SSO.</p>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+      <!-- Card 1: Local Admin Login -->
+      <div class="panel" style="padding: 24px;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
+          <span style="font-size: 20px;">🛡️</span>
+          <div>
+            <div style="font-size: 16px; font-weight: bold; color: #fff;">Local Administrator</div>
+            <div style="font-size: 12px; color: var(--text-dim);">Direct server account authentication</div>
+          </div>
+        </div>
+
+        <form onsubmit="submitLocalLogin(event)">
+          <div class="form-group">
+            <label class="form-label">Username</label>
+            <input id="login-username" class="form-input" type="text" placeholder="admin" value="admin" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Password</label>
+            <input id="login-password" class="form-input" type="password" placeholder="Enter administrator password" required autocomplete="current-password">
+            <div class="metric-sub">Generated in server console on first startup</div>
+          </div>
+          <div id="login-error-box" style="display: none; background: var(--accent-red-dim); border: 1px solid var(--accent-red); color: #ff8080; padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 16px;"></div>
+          <button type="submit" id="btn-local-login-submit" class="btn btn-primary" style="width: 100%; justify-content: center; padding: 10px 0;">Sign In as Local Admin</button>
+        </form>
+      </div>
+
+      <!-- Card 2: KySignOn SSO Gateway & Pairing -->
+      <div class="panel" style="padding: 24px; display: flex; flex-direction: column; justify-content: space-between;">
+        <div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span style="font-size: 20px;">🔑</span>
+              <div>
+                <div style="font-size: 16px; font-weight: bold; color: #fff;">KySignOn SSO</div>
+                <div style="font-size: 12px; color: var(--text-dim);">OpenID Connect (OIDC + PKCE)</div>
+              </div>
+            </div>
+            <span id="login-sso-badge" class="status-pill warning"><span class="dot"></span> NOT PAIRED</span>
+          </div>
+
+          <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
+            KySignOn provides centralized role-based single sign-on across the KySecurity Suite and Business.app ecosystem.
+          </p>
+
+          <div id="sso-active-section" style="display: none; margin-bottom: 16px;">
+            <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">Authority: <code id="login-sso-issuer-label">https://auth.kysecurity.local</code></div>
+            <button class="btn btn-primary" onclick="handleLogin()" style="width: 100%; justify-content: center; padding: 10px 0; background: linear-gradient(135deg, #4deeea, #3498db); color: #090d14; font-weight: bold;">⚡ Sign In with KySignOn SSO</button>
+          </div>
+        </div>
+
+        <div style="background: var(--bg-card); padding: 14px; border-radius: 6px; border: 1px solid var(--border-color); margin-top: 16px;">
+          <div style="font-size: 12px; font-weight: bold; color: #fff; margin-bottom: 4px;">SSO Authority Configuration</div>
+          <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 10px;">Pair or update your KySignOn OAuth credentials directly in the server.</p>
+          <button class="btn btn-secondary btn-sm" onclick="openSSOConfigModal()" style="width: 100%; justify-content: center;">⚙️ Configure / Pair KySignOn SSO</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard Container (Visible When Authenticated) -->
+  <div id="dashboard-view">
   <!-- Navigation Tabs -->
   <nav class="nav-tabs">
     <button class="tab-btn active" data-tab="tab-overview">Overview</button>
@@ -718,6 +789,97 @@
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" onclick="closeDrillModal()">Close</button>
           <button type="submit" id="btn-run-drill-submit" class="btn btn-primary">Run Isolated Drill</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  </div> <!-- End #dashboard-view -->
+
+  <!-- SSO Pairing & Configuration Modal -->
+  <div id="sso-config-modal" class="modal-overlay">
+    <div class="modal-card" style="max-width: 640px;">
+      <div class="modal-header">
+        <div class="panel-title">KySignOn SSO Pairing & Configuration</div>
+        <button class="btn btn-secondary btn-sm" onclick="closeSSOConfigModal()">✕</button>
+      </div>
+      <form onsubmit="submitSSOConfig(event)">
+        <div class="modal-body">
+          <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+            Configure OpenID Connect (OIDC) integration to enable Single Sign-On and role-based access delegation through your KySignOn server.
+          </p>
+
+          <div class="form-group" style="display: flex; align-items: center; gap: 10px; background: var(--bg-card); padding: 12px 16px; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 16px;">
+            <input id="sso-enabled-check" type="checkbox" style="width: 18px; height: 18px; cursor: pointer;">
+            <label for="sso-enabled-check" style="font-size: 14px; font-weight: bold; color: #fff; cursor: pointer; margin: 0;">Enable KySignOn SSO Authentication</label>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">KySignOn Issuer URL</label>
+            <input id="sso-issuer-input" class="form-input" type="url" placeholder="https://auth.kysecurity.local" required>
+            <div class="metric-sub">Base URL of your KySignOn instance (e.g. http://localhost:8080 or https://auth.kysecurity.org)</div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <div class="form-group">
+              <label class="form-label">OAuth Client ID</label>
+              <input id="sso-client-id-input" class="form-input" type="text" placeholder="kyrecovery-server" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">OAuth Client Secret</label>
+              <input id="sso-client-secret-input" class="form-input" type="password" placeholder="••••••••">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Callback / Redirect URI</label>
+            <input id="sso-redirect-input" class="form-input" type="text" placeholder="http://localhost:8095/api/auth/callback">
+            <div class="metric-sub">Must match the registered Redirect URI in KySignOn client settings</div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Administrator Email (Grants ADMIN role)</label>
+            <input id="sso-admin-email-input" class="form-input" type="email" placeholder="admin@kysecurity.local">
+          </div>
+
+          <div id="sso-test-status" style="display: none; font-size: 13px; padding: 10px 14px; border-radius: 6px; margin-top: 12px;"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="testSSOConnection()">Test Connection</button>
+          <button type="button" class="btn btn-secondary" onclick="closeSSOConfigModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save & Apply SSO Pairing</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Change Password Modal -->
+  <div id="change-password-modal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="panel-title">Change Local Password</div>
+        <button class="btn btn-secondary btn-sm" onclick="closeChangePasswordModal()">✕</button>
+      </div>
+      <form onsubmit="submitChangePassword(event)">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">Current Password</label>
+            <input id="pass-current" class="form-input" type="password" required autocomplete="current-password">
+          </div>
+          <div class="form-group">
+            <label class="form-label">New Password</label>
+            <input id="pass-new" class="form-input" type="password" minlength="8" required autocomplete="new-password">
+            <div class="metric-sub">Minimum 8 characters</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Confirm New Password</label>
+            <input id="pass-confirm" class="form-input" type="password" minlength="8" required autocomplete="new-password">
+          </div>
+          <div id="change-pass-error" style="display: none; background: var(--accent-red-dim); border: 1px solid var(--accent-red); color: #ff8080; padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-top: 10px;"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="closeChangePasswordModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Update Password</button>
         </div>
       </form>
     </div>
