@@ -121,6 +121,20 @@ func (s *Server) routes() {
 		w.Write(data)
 	})
 
+	// Favicon Routes
+	faviconHandler := func(w http.ResponseWriter, r *http.Request) {
+		data, err := staticFS.ReadFile("static/favicon.svg")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(data)
+	}
+	s.mux.HandleFunc("/favicon.svg", faviconHandler)
+	s.mux.HandleFunc("/favicon.ico", faviconHandler)
+
 	// Auth & SSO Routes
 	s.mux.HandleFunc("/api/auth/config", s.handleAuthConfig)
 	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
@@ -172,7 +186,9 @@ func (s *Server) routes() {
 
 func isPublicPath(p string) bool {
 	switch p {
-	case "/api/auth/config",
+	case "/favicon.svg",
+		"/favicon.ico",
+		"/api/auth/config",
 		"/api/auth/me",
 		"/api/auth/login",
 		"/api/auth/login/local",

@@ -33,7 +33,22 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("server.New failed: %v", err)
 	}
 
-	// 0. Test POST /api/auth/login/local
+	// 0a. Test GET /favicon.svg & /favicon.ico
+	favReq := httptest.NewRequest(http.MethodGet, "/favicon.svg", nil)
+	favRec := httptest.NewRecorder()
+	srv.ServeHTTP(favRec, favReq)
+	if favRec.Code != http.StatusOK || favRec.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Fatalf("GET /favicon.svg expected 200 image/svg+xml, got %d %s", favRec.Code, favRec.Header().Get("Content-Type"))
+	}
+
+	favIcoReq := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
+	favIcoRec := httptest.NewRecorder()
+	srv.ServeHTTP(favIcoRec, favIcoReq)
+	if favIcoRec.Code != http.StatusOK {
+		t.Fatalf("GET /favicon.ico expected 200, got %d", favIcoRec.Code)
+	}
+
+	// 0b. Test POST /api/auth/login/local
 	loginBody, _ := json.Marshal(map[string]string{
 		"username": "admin",
 		"password": adminPass,

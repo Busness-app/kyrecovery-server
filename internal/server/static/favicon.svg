@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Rounded dark background badge with subtle patina border -->
+  <rect width="64" height="64" rx="14" fill="#0d0f14"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#4deeea" stroke-opacity="0.3" stroke-width="1.5"/>
+  
+  <!-- Outer Shield / Recovery Archive Contour -->
+  <path d="M32 10 L48 16 V30 C48 41.5 41.2 50.2 32 54 C22.8 50.2 16 41.5 16 30 V16 L32 10 Z" 
+        fill="#121820" 
+        stroke="#4deeea" 
+        stroke-width="2.5" 
+        stroke-linejoin="round"/>
+  
+  <!-- Inner Recovery Lightning / Restoration Emblem -->
+  <path d="M34 19 L23 33 H32 L29 45 L41 30 H32 L34 19 Z" 
+        fill="#4deeea" 
+        stroke="#0d0f14" 
+        stroke-width="1" 
+        stroke-linejoin="round"/>
+  
+  <!-- Quorum Custodian Nodes -->
+  <circle cx="23" cy="22" r="1.8" fill="#4deeea" fill-opacity="0.8"/>
+  <circle cx="41" cy="22" r="1.8" fill="#4deeea" fill-opacity="0.8"/>
+  <circle cx="32" cy="48" r="1.8" fill="#4deeea" fill-opacity="0.8"/>
+</svg>
