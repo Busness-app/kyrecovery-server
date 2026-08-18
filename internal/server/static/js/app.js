@@ -463,24 +463,11 @@ async function loadAuthUser() {
     const btnChangePass = document.getElementById('btn-change-pass-header');
     const loginGateway = document.getElementById('login-gateway-view');
     const dashboardView = document.getElementById('dashboard-view');
-    const ssoBadge = document.getElementById('login-sso-badge');
     const ssoActiveSection = document.getElementById('sso-active-section');
-    const ssoIssuerLabel = document.getElementById('login-sso-issuer-label');
 
-    // Update SSO Gateway View status
-    if (ssoConfig && ssoConfig.enabled && ssoConfig.issuer_url) {
-      if (ssoBadge) {
-        ssoBadge.className = 'status-pill ready';
-        ssoBadge.innerHTML = '<span class="dot"></span> PAIRED & ACTIVE';
-      }
-      if (ssoActiveSection) ssoActiveSection.style.display = 'block';
-      if (ssoIssuerLabel) ssoIssuerLabel.textContent = ssoConfig.issuer_url;
-    } else {
-      if (ssoBadge) {
-        ssoBadge.className = 'status-pill warning';
-        ssoBadge.innerHTML = '<span class="dot"></span> NOT PAIRED';
-      }
-      if (ssoActiveSection) ssoActiveSection.style.display = 'none';
+    // Show SSO sign-in button only if SSO is paired & active
+    if (ssoActiveSection) {
+      ssoActiveSection.style.display = (ssoConfig && ssoConfig.enabled && ssoConfig.issuer_url) ? 'block' : 'none';
     }
 
     if (data.authenticated && data.user) {
