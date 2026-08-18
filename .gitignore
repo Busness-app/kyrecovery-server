@@ -1,0 +1,16 @@
+# Binaries
+/kyrecovery
+*.exe
+*.test
+
+# Data & temporary drill files
+data/
+*.db
+*.db-wal
+*.db-shm
+*.kycap
+
+# OS and IDE files
+.DS_Store
+.idea/
+.vscode/

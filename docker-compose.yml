@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  kyrecovery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kyrecovery-server
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=8095
+      - DATA_DIR=/app/data
