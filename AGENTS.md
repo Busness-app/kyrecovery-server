@@ -62,3 +62,4 @@ go build -o kyrecovery cmd/kyrecovery/main.go
 ```
 
 ## Child DOX Index
+- `zero_code_pairing_handoff_spec.md`: authoritative spec for the zero-code pairing and self-declaring backup ingest API this server exposes (`/api/pairing/generate`, `/api/pairing/claim`, `/api/backup/push`). A change here is breaking for every paired product; update their copies in the same change set.
