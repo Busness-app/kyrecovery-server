@@ -422,7 +422,10 @@ func extractTarReaderToDir(tr *tar.Reader, destDir string) error {
 			return err
 		}
 
-		destPath := filepath.Join(destDir, hdr.Name)
+		destPath, err := SafeJoin(destDir, hdr.Name)
+		if err != nil {
+			return err
+		}
 		if hdr.Typeflag == tar.TypeDir {
 			_ = os.MkdirAll(destPath, 0700)
 			continue

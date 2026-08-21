@@ -100,6 +100,7 @@ sequenceDiagram
 - **Error Codes**:
   - `400 Bad Request`: Invalid or expired pairing code.
   - `409 Conflict`: Pairing code already claimed.
+  - `429 Too Many Requests`: More than 10 claim attempts from one source address, or 5 for one code, within 15 minutes.
 
 ---
 
@@ -141,6 +142,8 @@ sequenceDiagram
     }
   }
   ```
+`files` also accepts the compact form `{"data/notes.db": "<base64>"}`, and `dependencies` also accepts an explicit `[{name, type, required, description}]` array. Per-file `mode` is accepted but not applied: restored files are written `0600` inside the `0700` drill sandbox.
+
 - **Response** (`200 OK`):
   ```json
   {
@@ -158,12 +161,12 @@ sequenceDiagram
       "passed": true,
       "duration_ms": 42,
       "checks": [
-        { "name": "Directory Unpack", "passed": true, "message": "Extracted 2 files (1.00 MB)" },
-        { "name": "Required Files", "passed": true, "message": "All 2 required files verified" },
-        { "name": "SQLite Integrity: data/notes.db", "passed": true, "message": "PRAGMA integrity_check passed ok" },
-        { "name": "Signing Key: certs/jwt_signing.key", "passed": true, "message": "Parsed RSA private key (2048 bits), signing & verification cycle passed" },
-        { "name": "Environment Variables", "passed": true, "message": "All 2 declared environment variables verified" },
-        { "name": "Network Ports", "passed": true, "message": "All 1 declared network ports verified" }
+        { "name": "required_file:data/notes.db", "passed": true, "message": "File exists" },
+        { "name": "sqlite_check:data/notes.db", "passed": true, "message": "SQLite integrity verified ok" },
+        { "name": "signing_key:certs/jwt_signing.key", "passed": true, "message": "Parsed RSA private key (2048 bits), signing & verification cycle passed" },
+        { "name": "expected_env", "passed": true, "message": "All 2 declared environment variables verified" },
+        { "name": "expected_ports", "passed": true, "message": "All 1 declared network ports verified" },
+        { "name": "dependencies", "passed": true, "message": "All dependencies satisfied" }
       ]
     }
   }
@@ -182,8 +185,8 @@ Client applications declare their verification contract directly in `verificatio
 | `test_signing_key_path` | `string` | Relative path to RSA or ECDSA private key PEM file to test signing/verification. |
 | `signing_algorithm` | `string` | `"rsa"` (RSA PKCS#1v15 / SHA-256) or `"ecdsa"` (ECDSA P-256 / SHA-256). |
 | `required_files` | `string[]` | List of relative file paths that must exist and be non-empty after restoration. |
-| `expected_env` | `string[]` | Environment variables required for application operation. |
-| `expected_ports` | `integer[]` | TCP/UDP ports declared by the service. |
+| `expected_env` | `string[]` | Environment variables the service needs; verified to have survived restore as `env` dependencies in the capsule manifest. |
+| `expected_ports` | `integer[]` | TCP/UDP ports the service needs; verified to have survived restore as `port` dependencies in the capsule manifest. |
 
 ---
 
@@ -337,6 +340,7 @@ curl -s -X POST https://recovery.internal:8080/api/backup/push \
 
 1. **Content-Blind Cryptographic Encapsulation**: Ingested payloads are encrypted immediately with standard AES-256-GCM using an ephemeral 256-bit symmetric key split via Shamir's Secret Sharing ($M$-of-$N$).
 2. **Ephemeral Sandbox Isolation**: Restore verification drills run in temporary scratch directories with strict POSIX `0700` permissions. Upon drill completion, the scratch directory is cryptographically scrubbed and wiped from disk.
-3. **Single-Use Ephemeral PINs**: Pairing codes expire after 15 minutes (or configurable TTL) and are invalidated immediately upon first claim.
+3. **Single-Use Ephemeral PINs**: Pairing codes expire after 15 minutes (or configurable TTL) and are invalidated immediately upon first claim. The status and expiry guards are enforced in the claim `UPDATE` itself, so concurrent claims of one code cannot both mint a token. Claim attempts are capped per source address (10) and per code (5) inside each 15-minute window.
 4. **Tamper-Evident Hash-Chained Audit Ledger**: Every pairing generation, claim, backup push, and verification drill event is cryptographically sealed into the SHA-256 hash chain with strict sequential monotonic IDs.
 5. **Zero-Secret Logging**: In accordance with `LOGGING.md`, logs emit structured logfmt/JSON containing only capsule IDs, sequence numbers, and byte sizes—never API tokens, payload contents, or decryption keys.
+6. **Restore Path Containment**: Capsule entries are refused at ingest and again at extraction if they would resolve outside the restore directory.

@@ -71,7 +71,7 @@ func TestClientSDKFlow(t *testing.T) {
 		t.Fatalf("PushDirectory failed: %v", err)
 	}
 
-	if pushResp.Status != "success" || pushResp.CapsuleID == "" {
+	if pushResp.Status != "ingested" || pushResp.CapsuleID == "" {
 		t.Fatalf("unexpected push response: %+v", pushResp)
 	}
 }

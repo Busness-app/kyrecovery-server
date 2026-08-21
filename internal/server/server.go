@@ -50,6 +50,7 @@ type Server struct {
 	replication *replication.Manager
 	inspector   *diff.Inspector
 	adapters    map[string]adapter.ServiceAdapter
+	claimLimit  *rateLimiter
 	mux         *http.ServeMux
 }
 
@@ -93,6 +94,7 @@ func New(cfg Config, database *db.DB, ledger *audit.Ledger) (*Server, error) {
 		replication: replMgr,
 		inspector:   inspector,
 		adapters:    adapters,
+		claimLimit:  newRateLimiter(claimWindow),
 		mux:         http.NewServeMux(),
 	}
 
@@ -704,9 +706,22 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
+	ipKey := "ip:" + clientIP(r)
+	if s.claimLimit.exceeded(ipKey, claimAttemptsPerIP, now) {
+		writeError(w, http.StatusTooManyRequests, "Too many pairing attempts from this address")
+		return
+	}
+
 	var req pairingClaimRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PairingCode == "" {
+		s.claimLimit.recordFailure(ipKey, now)
 		writeError(w, http.StatusBadRequest, "PairingCode is required")
+		return
+	}
+	codeKey := "code:" + req.PairingCode
+	if s.claimLimit.exceeded(codeKey, claimAttemptsPerCode, now) {
+		writeError(w, http.StatusTooManyRequests, "Too many attempts for this pairing code")
 		return
 	}
 	if req.ServiceName == "" {
@@ -718,7 +733,13 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 
 	app, err := s.db.ClaimPairingCode(r.Context(), req.PairingCode, req.ServiceName, req.AppName)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.claimLimit.recordFailure(ipKey, now)
+		s.claimLimit.recordFailure(codeKey, now)
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already consumed") {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 
@@ -728,10 +749,12 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":           app.ID,
 		"status":       "paired",
 		"api_token":    app.APIToken,
 		"service_name": app.ServiceName,
 		"app_name":     app.AppName,
+		"paired_at":    app.PairedAt,
 		"server_url":   r.Host,
 	})
 }
@@ -859,11 +882,13 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "success",
+		"status":        "ingested",
 		"capsule_id":    capsuleID,
+		"service_name":  payload.ServiceName,
+		"size_bytes":    capRec.SizeBytes,
 		"payload_hash":  packResult.Manifest.PayloadHash,
 		"shares":        shareList,
-		"initial_drill": drillSummary,
+		"drill_summary": drillSummary,
 	})
 }
 

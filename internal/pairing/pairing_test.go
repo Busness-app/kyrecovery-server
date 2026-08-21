@@ -3,6 +3,7 @@ package pairing_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -76,5 +77,79 @@ func TestPairingAndSelfDeclaredIngest(t *testing.T) {
 	}
 	if len(files) != 2 || len(deps) != 1 || recipe.ServiceName != "kynotes" {
 		t.Fatalf("ingested payload mismatch: files=%d, deps=%d, recipe=%+v", len(files), len(deps), recipe)
+	}
+}
+
+// The published wire format (files array, dependency declaration object,
+// verification_recipe key) must decode to the same payload as the compact form.
+func TestSelfDeclaredPayloadAcceptsPublishedWireFormat(t *testing.T) {
+	body := []byte(`{
+		"service_name": "kynotes",
+		"app_version": "1.4.2",
+		"threshold": 2,
+		"total_shares": 3,
+		"files": [
+			{"path": "data/notes.db", "data_base64": "bW9jay1kYg==", "mode": 384},
+			{"path": "certs/jwt_signing.key", "data_base64": "bW9jay1rZXk=", "mode": 384}
+		],
+		"dependencies": {"ports": [8080], "env": ["KY_ISSUER", "DATABASE_URL"]},
+		"verification_recipe": {
+			"check_sqlite_integrity": true,
+			"sqlite_paths": ["data/notes.db"],
+			"test_signing_key_path": "certs/jwt_signing.key",
+			"signing_algorithm": "rsa",
+			"required_files": ["data/notes.db"],
+			"expected_env": ["KY_ISSUER", "DATABASE_URL"],
+			"expected_ports": [8080]
+		}
+	}`)
+
+	var payload pairing.SelfDeclaredBackupPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decoding published wire format failed: %v", err)
+	}
+
+	files, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload)
+	if err != nil {
+		t.Fatalf("IngestSelfDeclaredBackup failed: %v", err)
+	}
+	if len(files) != 2 || string(files["data/notes.db"]) != "mock-db" {
+		t.Fatalf("files array form decoded wrong: %v", files)
+	}
+	if len(deps) != 3 {
+		t.Fatalf("expected 3 declared dependencies, got %d: %+v", len(deps), deps)
+	}
+	var ports, envs int
+	for _, dep := range deps {
+		switch dep.Type {
+		case "port":
+			ports++
+		case "env":
+			envs++
+		}
+	}
+	if ports != 1 || envs != 2 {
+		t.Fatalf("dependency declaration mapped wrong: ports=%d envs=%d", ports, envs)
+	}
+	if !recipe.VerifyChecks.CheckSQLiteIntegrity ||
+		recipe.VerifyChecks.TestSigningKeyPath != "certs/jwt_signing.key" ||
+		recipe.VerifyChecks.SigningAlgorithm != "rsa" ||
+		len(recipe.VerifyChecks.SQLitePaths) != 1 ||
+		len(recipe.VerifyChecks.ExpectedEnv) != 2 ||
+		len(recipe.VerifyChecks.ExpectedPorts) != 1 {
+		t.Fatalf("verification_recipe not applied: %+v", recipe.VerifyChecks)
+	}
+}
+
+// Paths that would escape the restore directory are refused at the API boundary.
+func TestSelfDeclaredIngestRejectsPathTraversal(t *testing.T) {
+	for _, bad := range []string{"../../etc/cron.d/pwn", "/etc/passwd", "data/../../escape"} {
+		payload := pairing.SelfDeclaredBackupPayload{
+			ServiceName: "kynotes",
+			Files:       pairing.BackupFiles{bad: base64.StdEncoding.EncodeToString([]byte("x"))},
+		}
+		if _, _, _, err := pairing.IngestSelfDeclaredBackup(payload); err == nil {
+			t.Fatalf("expected rejection of unsafe path %q", bad)
+		}
 	}
 }

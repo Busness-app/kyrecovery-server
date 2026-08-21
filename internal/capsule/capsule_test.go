@@ -105,3 +105,17 @@ func TestPackAndUnpackCapsule(t *testing.T) {
 		t.Fatalf("extracted disk file content mismatch")
 	}
 }
+
+// Capsule contents are client-supplied, so extraction must refuse to escape the target dir.
+func TestExtractToDirectoryRejectsPathTraversal(t *testing.T) {
+	targetDir := filepath.Join(t.TempDir(), "restore")
+	escapee := filepath.Join(filepath.Dir(targetDir), "escaped.txt")
+
+	err := capsule.ExtractToDirectory(map[string][]byte{"../escaped.txt": []byte("pwned")}, targetDir)
+	if err == nil {
+		t.Fatal("expected extraction of ../escaped.txt to be refused")
+	}
+	if _, statErr := os.Stat(escapee); statErr == nil {
+		t.Fatalf("traversal wrote outside the target directory: %s", escapee)
+	}
+}

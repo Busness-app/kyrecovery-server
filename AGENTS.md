@@ -5,7 +5,7 @@ KyRecovery Server is the self-hosted recovery and restore-verification service f
 ## Core Capabilities & Responsibilities
 
 1. **Encrypted Recovery Capsules**: Generates and stores content-blind `.kycap` recovery archives containing service databases, signing keys, and configuration manifests.
-2. **Zero-Code Product Pairing & Self-Declaring Ingest**: Generates ephemeral 6-digit pairing codes (`/api/pairing/*`). Any KySecurity or Business.app service pairs seamlessly and pushes self-declared backups (`/api/backup/push`) with custom files and verification recipes without KyRecovery server code modifications.
+2. **Zero-Code Product Pairing & Self-Declaring Ingest**: Generates ephemeral 6-digit pairing codes (`/api/pairing/*`). Any KySecurity or Business.app service pairs seamlessly and pushes self-declared backups (`/api/backup/push`) with custom files and verification recipes without KyRecovery server code modifications. The wire contract is `zero_code_pairing_handoff_spec.md`; changes to either side must keep `TestPublishedSpecClientCanPairAndPush` passing.
 3. **Local Admin Bootstrap & KySignOn OIDC SSO Pairing**: Generates local administrator credentials on first startup, protects dashboard and API routes with Argon2id salted password authentication and SQLite session tokens, and provides an interactive KySignOn OIDC SSO pairing portal with PKCE (`S256`) and RBAC (`admin`, `operator`, `viewer`).
 4. **Interactive Custodian Quorum Ceremonies ($M$-of-$N$)**: Coordinates multi-party asynchronous Shamir share gathering via ephemeral in-memory sessions with automatic zeroing memory scrub upon execution.
 5. **Offsite Remote Capsule Replication (S3 / Cloudflare R2 / Local Mounts)**: Automatically or manually replicates content-blind `.kycap` recovery archives to AWS S3, Cloudflare R2, MinIO, or offsite disk mounts using pure-Go SigV4 signing.
@@ -23,6 +23,8 @@ KyRecovery Server is the self-hosted recovery and restore-verification service f
 - Drill scratch environments must be created with restricted permissions (`0700`) and securely scrubbed upon drill completion.
 - SQLite database transactions must be atomic and use WAL mode with foreign key constraints.
 - Sensitive HTTP responses must enforce `Cache-Control: no-store` and standard security headers.
+- Unauthenticated pairing claims are rate limited per source address and per code, and the claim's single-use and expiry guards live in the SQL `UPDATE`, not only in Go checks.
+- Capsule entries never resolve outside their restore directory: every extraction path goes through `capsule.SafeJoin`.
 
 # Ponytail, lazy senior dev mode
 

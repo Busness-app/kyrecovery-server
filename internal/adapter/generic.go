@@ -2,6 +2,11 @@ package adapter
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
@@ -10,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +37,13 @@ type GenericVerifyRules struct {
 	ValidateJSONFiles    bool     `json:"validate_json_files"`    // Validate JSON syntax on .json files
 	ValidateCertificates bool     `json:"validate_certificates"`  // Validate TLS certs / keys on .pem, .crt, .key files
 	RequiredFiles        []string `json:"required_files"`         // Explicit required file paths
+
+	CheckSQLiteIntegrity bool     `json:"check_sqlite_integrity"` // Run PRAGMA integrity_check on SQLitePaths
+	SQLitePaths          []string `json:"sqlite_paths"`           // Databases to integrity check by path
+	TestSigningKeyPath   string   `json:"test_signing_key_path"`  // PEM private key to exercise with a sign/verify cycle
+	SigningAlgorithm     string   `json:"signing_algorithm"`      // "rsa" or "ecdsa"; empty accepts either
+	ExpectedEnv          []string `json:"expected_env"`           // Env var dependencies that must survive in the capsule
+	ExpectedPorts        []int    `json:"expected_ports"`         // Port dependencies that must survive in the capsule
 }
 
 // GenericAdapter provides a pluggable, recipe-driven adapter for any application or service.
@@ -41,7 +54,7 @@ type GenericAdapter struct {
 // NewGenericAdapter creates a generic connector with optional default recipe.
 func NewGenericAdapter(defaultRecipe ...GenericRecipe) *GenericAdapter {
 	recipe := GenericRecipe{
-		ServiceName: "generic",
+		ServiceName:  "generic",
 		IncludePaths: []string{"data", "config", "keys"},
 		VerifyChecks: GenericVerifyRules{
 			CheckSQLiteDatabases: true,
@@ -142,23 +155,56 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 		_ = json.Unmarshal(data, &recipe)
 	}
 
+	// A recipe asking for integrity checks without naming paths falls back to the extension scan,
+	// so check_sqlite_integrity is never a silent no-op.
+	if recipe.VerifyChecks.CheckSQLiteIntegrity && len(recipe.VerifyChecks.SQLitePaths) == 0 {
+		recipe.VerifyChecks.CheckSQLiteDatabases = true
+	}
+
 	var verifiedFilesCount int
+	checkedDBs := make(map[string]bool)
 
 	// 1. Required Files Check
 	for _, reqFile := range recipe.VerifyChecks.RequiredFiles {
 		p := filepath.Join(extractedDir, reqFile)
-		if _, err := os.Stat(p); err != nil {
+		info, err := os.Stat(p)
+		switch {
+		case err != nil:
 			result.Passed = false
 			result.Checks = append(result.Checks, CheckItem{
 				Name:    fmt.Sprintf("required_file:%s", reqFile),
 				Passed:  false,
 				Message: fmt.Sprintf("Missing required file: %s", reqFile),
 			})
-		} else {
+		case info.Size() == 0:
+			// An empty restored file is a failed restore, not a present one.
+			result.Passed = false
+			result.Checks = append(result.Checks, CheckItem{
+				Name:    fmt.Sprintf("required_file:%s", reqFile),
+				Passed:  false,
+				Message: fmt.Sprintf("Required file restored empty: %s", reqFile),
+			})
+		default:
 			result.Checks = append(result.Checks, CheckItem{
 				Name:    fmt.Sprintf("required_file:%s", reqFile),
 				Passed:  true,
-				Message: "File exists",
+				Message: fmt.Sprintf("File exists (%d bytes)", info.Size()),
+			})
+		}
+	}
+
+	// 1b. Databases named explicitly by the recipe
+	if recipe.VerifyChecks.CheckSQLiteIntegrity {
+		for _, relPath := range recipe.VerifyChecks.SQLitePaths {
+			ok, msg := checkSQLiteIntegrity(ctx, filepath.Join(extractedDir, relPath))
+			checkedDBs[relPath] = true
+			if !ok {
+				result.Passed = false
+			}
+			result.Checks = append(result.Checks, CheckItem{
+				Name:    fmt.Sprintf("sqlite_check:%s", relPath),
+				Passed:  ok,
+				Message: msg,
 			})
 		}
 	}
@@ -174,34 +220,16 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 		verifiedFilesCount++
 
 		// 2. Check SQLite Databases
-		if recipe.VerifyChecks.CheckSQLiteDatabases && (ext == ".db" || ext == ".sqlite" || ext == ".sqlite3") {
-			conn, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=query_only(true)", path))
-			if err != nil {
+		if recipe.VerifyChecks.CheckSQLiteDatabases && !checkedDBs[relPath] && (ext == ".db" || ext == ".sqlite" || ext == ".sqlite3") {
+			ok, msg := checkSQLiteIntegrity(ctx, path)
+			if !ok {
 				result.Passed = false
-				result.Checks = append(result.Checks, CheckItem{
-					Name:    fmt.Sprintf("sqlite_check:%s", relPath),
-					Passed:  false,
-					Message: fmt.Sprintf("Failed opening SQLite DB: %v", err),
-				})
-			} else {
-				var integrity string
-				err := conn.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity)
-				conn.Close()
-				if err != nil || integrity != "ok" {
-					result.Passed = false
-					result.Checks = append(result.Checks, CheckItem{
-						Name:    fmt.Sprintf("sqlite_check:%s", relPath),
-						Passed:  false,
-						Message: fmt.Sprintf("SQLite integrity check failed: %v (%s)", err, integrity),
-					})
-				} else {
-					result.Checks = append(result.Checks, CheckItem{
-						Name:    fmt.Sprintf("sqlite_check:%s", relPath),
-						Passed:  true,
-						Message: "SQLite integrity verified ok",
-					})
-				}
 			}
+			result.Checks = append(result.Checks, CheckItem{
+				Name:    fmt.Sprintf("sqlite_check:%s", relPath),
+				Passed:  ok,
+				Message: msg,
+			})
 		}
 
 		// 3. Validate JSON Files
@@ -314,7 +342,44 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 
 	result.Details["verified_files_count"] = verifiedFilesCount
 
-	// 5. Check dependencies
+	// 5. Prove the declared signing key still signs and verifies
+	if keyPath := recipe.VerifyChecks.TestSigningKeyPath; keyPath != "" {
+		ok, msg := testSigningKey(filepath.Join(extractedDir, keyPath), recipe.VerifyChecks.SigningAlgorithm)
+		if !ok {
+			result.Passed = false
+		}
+		result.Checks = append(result.Checks, CheckItem{
+			Name:    fmt.Sprintf("signing_key:%s", keyPath),
+			Passed:  ok,
+			Message: msg,
+		})
+	}
+
+	// 6. Declared environment variables and ports must survive in the capsule manifest
+	if want := recipe.VerifyChecks.ExpectedEnv; len(want) > 0 {
+		missing := missingDeclared(manifest.Dependencies, "env", want)
+		result.MissingDependencies = append(result.MissingDependencies, missing...)
+		result.Checks = append(result.Checks, CheckItem{
+			Name:    "expected_env",
+			Passed:  len(missing) == 0,
+			Message: declarationMessage(len(want), "environment variables", missing),
+		})
+	}
+	if want := recipe.VerifyChecks.ExpectedPorts; len(want) > 0 {
+		names := make([]string, 0, len(want))
+		for _, port := range want {
+			names = append(names, strconv.Itoa(port))
+		}
+		missing := missingDeclared(manifest.Dependencies, "port", names)
+		result.MissingDependencies = append(result.MissingDependencies, missing...)
+		result.Checks = append(result.Checks, CheckItem{
+			Name:    "expected_ports",
+			Passed:  len(missing) == 0,
+			Message: declarationMessage(len(want), "network ports", missing),
+		})
+	}
+
+	// 7. Check dependencies
 	for _, dep := range manifest.Dependencies {
 		if dep.Required && dep.Name == "" {
 			result.MissingDependencies = append(result.MissingDependencies, "unnamed_dependency")
@@ -333,6 +398,102 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 	}
 
 	return result, nil
+}
+
+// checkSQLiteIntegrity runs PRAGMA integrity_check against a restored database file.
+func checkSQLiteIntegrity(ctx context.Context, path string) (bool, string) {
+	conn, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=query_only(true)", path))
+	if err != nil {
+		return false, fmt.Sprintf("Failed opening SQLite DB: %v", err)
+	}
+	defer conn.Close()
+
+	var integrity string
+	if err := conn.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+		return false, fmt.Sprintf("SQLite integrity check failed: %v (%s)", err, integrity)
+	}
+	return true, "SQLite integrity verified ok"
+}
+
+// testSigningKey proves a restored PEM private key can still sign and verify a digest.
+func testSigningKey(path, algorithm string) (bool, string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Sprintf("Missing signing key: %v", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false, "Signing key is not valid PEM"
+	}
+	key, err := parsePrivateKey(block.Bytes)
+	if err != nil {
+		return false, fmt.Sprintf("Failed parsing private key: %v", err)
+	}
+
+	digest := sha256.Sum256([]byte("kyrecovery restore drill signing probe"))
+	switch k := key.(type) {
+	case *rsa.PrivateKey:
+		if algorithm != "" && !strings.EqualFold(algorithm, "rsa") {
+			return false, fmt.Sprintf("Recipe declared %q but the key is RSA", algorithm)
+		}
+		sig, err := rsa.SignPKCS1v15(rand.Reader, k, crypto.SHA256, digest[:])
+		if err != nil {
+			return false, fmt.Sprintf("RSA signing failed: %v", err)
+		}
+		if err := rsa.VerifyPKCS1v15(&k.PublicKey, crypto.SHA256, digest[:], sig); err != nil {
+			return false, fmt.Sprintf("RSA verification failed: %v", err)
+		}
+		return true, fmt.Sprintf("Parsed RSA private key (%d bits), signing & verification cycle passed", k.N.BitLen())
+	case *ecdsa.PrivateKey:
+		if algorithm != "" && !strings.EqualFold(algorithm, "ecdsa") {
+			return false, fmt.Sprintf("Recipe declared %q but the key is ECDSA", algorithm)
+		}
+		sig, err := ecdsa.SignASN1(rand.Reader, k, digest[:])
+		if err != nil {
+			return false, fmt.Sprintf("ECDSA signing failed: %v", err)
+		}
+		if !ecdsa.VerifyASN1(&k.PublicKey, digest[:], sig) {
+			return false, "ECDSA verification failed"
+		}
+		return true, fmt.Sprintf("Parsed ECDSA private key (Curve: %s), signing & verification cycle passed", k.Curve.Params().Name)
+	default:
+		return false, fmt.Sprintf("Unsupported signing key type %T", key)
+	}
+}
+
+// parsePrivateKey accepts PKCS#1, PKCS#8, or SEC-1 encoded private keys.
+func parsePrivateKey(der []byte) (any, error) {
+	if k, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return k, nil
+	}
+	if k, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		return k, nil
+	}
+	return x509.ParseECPrivateKey(der)
+}
+
+// missingDeclared reports which wanted dependency names of depType are absent from deps.
+func missingDeclared(deps []capsule.Dependency, depType string, want []string) []string {
+	have := make(map[string]bool, len(deps))
+	for _, dep := range deps {
+		if strings.EqualFold(dep.Type, depType) {
+			have[dep.Name] = true
+		}
+	}
+	var missing []string
+	for _, name := range want {
+		if !have[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+func declarationMessage(wanted int, kind string, missing []string) string {
+	if len(missing) > 0 {
+		return fmt.Sprintf("Missing declared %s: %v", kind, missing)
+	}
+	return fmt.Sprintf("All %d declared %s verified", wanted, kind)
 }
 
 func (g *GenericAdapter) generateSamplePayload(recipe GenericRecipe) (map[string][]byte, []capsule.Dependency, error) {

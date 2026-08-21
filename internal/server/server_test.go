@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"kyrecovery-server/internal/audit"
 	"kyrecovery-server/internal/auth"
 	"kyrecovery-server/internal/db"
+	"kyrecovery-server/internal/pairing"
 	"kyrecovery-server/internal/server"
+	"kyrecovery-server/pkg/client"
 )
 
 func TestServerEndpoints(t *testing.T) {
@@ -205,12 +208,16 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("POST /api/backup/push expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var pushResp struct {
-		Status   string `json:"status"`
-		CapsuleID string `json:"capsule_id"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &pushResp); err != nil || pushResp.Status != "success" {
+	// Decode through the published SDK type so the wire contract stays in sync with pkg/client.
+	var pushResp client.PushResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &pushResp); err != nil || pushResp.Status != "ingested" {
 		t.Fatalf("failed parsing backup push response: %+v", pushResp)
+	}
+	if pushResp.CapsuleID == "" || pushResp.ServiceName != "kynotes" || pushResp.SizeBytes <= 0 {
+		t.Fatalf("backup push response missing capsule fields: %+v", pushResp)
+	}
+	if pushResp.DrillSummary == nil {
+		t.Fatalf("backup push response missing drill_summary: %s", rec.Body.String())
 	}
 
 	// 9. Test GET /api/pairing/list
@@ -266,8 +273,8 @@ func TestServerEndpoints(t *testing.T) {
 
 	// 14. Test POST /api/ceremonies/create
 	ceremonyCreateBody, _ := json.Marshal(map[string]interface{}{
-		"capsule_id": captureResp.Capsule.ID,
-		"purpose":    "Interactive Quorum Drill",
+		"capsule_id":  captureResp.Capsule.ID,
+		"purpose":     "Interactive Quorum Drill",
 		"ttl_minutes": 30,
 	})
 	req = httptest.NewRequest(http.MethodPost, "/api/ceremonies/create", bytes.NewReader(ceremonyCreateBody))
@@ -442,4 +449,81 @@ func TestServerEndpoints(t *testing.T) {
 
 func fmtShare(idx byte, valHex string) string {
 	return fmt.Sprintf("%d-%s", idx, valHex)
+}
+
+// Unauthenticated claim attempts are capped per source address.
+func TestPairingClaimIsRateLimited(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer database.Close()
+
+	srv, err := server.New(server.Config{Port: 8096, DataDir: t.TempDir()}, database, audit.NewLedger(database))
+	if err != nil {
+		t.Fatalf("server.New failed: %v", err)
+	}
+
+	claim := func(code string) int {
+		body, _ := json.Marshal(map[string]string{"pairing_code": code, "app_name": "guesser"})
+		req := httptest.NewRequest(http.MethodPost, "/api/pairing/claim", bytes.NewReader(body))
+		req.RemoteAddr = "203.0.113.7:51000"
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Each guess is a different (wrong) code, so only the per-address cap can stop it.
+	for i := 0; i < 10; i++ {
+		if code := claim(fmt.Sprintf("%06d", 100000+i)); code != http.StatusBadRequest {
+			t.Fatalf("guess %d: expected 400, got %d", i, code)
+		}
+	}
+	if code := claim("999999"); code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after exhausting the per-address budget, got %d", code)
+	}
+
+	// A different address still gets its own budget.
+	body, _ := json.Marshal(map[string]string{"pairing_code": "999998", "app_name": "other"})
+	req := httptest.NewRequest(http.MethodPost, "/api/pairing/claim", bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.8:51000"
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unrelated address expected 400, got %d", rec.Code)
+	}
+}
+
+// Legitimate pairings must not consume the abuse budget, or a NAT'd host that pairs
+// several services would lock itself out.
+func TestSuccessfulClaimsDoNotConsumeRateBudget(t *testing.T) {
+	ctx := t.Context()
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer database.Close()
+
+	srv, err := server.New(server.Config{Port: 8099, DataDir: t.TempDir()}, database, audit.NewLedger(database))
+	if err != nil {
+		t.Fatalf("server.New failed: %v", err)
+	}
+
+	for i := 0; i < 15; i++ {
+		pending, err := pairing.GeneratePairingCode(ctx, database, 15*time.Minute, "kynotes", "Pending Service")
+		if err != nil {
+			t.Fatalf("GeneratePairingCode failed: %v", err)
+		}
+		body, _ := json.Marshal(map[string]string{
+			"pairing_code": pending.PairingCode,
+			"app_name":     fmt.Sprintf("KyNotes Node %d", i),
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/pairing/claim", bytes.NewReader(body))
+		req.RemoteAddr = "198.51.100.4:44000" // one shared NAT address
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("pairing %d from a shared address expected 200, got %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
 }

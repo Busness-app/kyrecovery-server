@@ -2,6 +2,8 @@ package db_test
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,5 +81,56 @@ func TestDatabaseOperations(t *testing.T) {
 	}
 	if lastDrill.Status != "passed" || lastDrill.DurationMs != 145 {
 		t.Fatalf("last drill data mismatch: %+v", lastDrill)
+	}
+}
+
+// Concurrent claims of one pairing code must mint exactly one token.
+func TestClaimPairingCodeIsSingleUseUnderRace(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	if err := database.InsertPairedApp(ctx, db.PairedAppRecord{
+		ID:          "pair-race",
+		ServiceName: "auto-declare",
+		AppName:     "Pending Service",
+		APIToken:    "kyrec_live_race",
+		PairingCode: "424242",
+		Status:      "pending",
+		ExpiresAt:   now.Add(15 * time.Minute),
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatalf("InsertPairedApp failed: %v", err)
+	}
+
+	const racers = 16
+	var wg sync.WaitGroup
+	results := make(chan error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			<-start
+			_, err := database.ClaimPairingCode(ctx, "424242", "kynotes", fmt.Sprintf("claimer-%d", n))
+			results <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	claimed := 0
+	for err := range results {
+		if err == nil {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("expected exactly 1 successful claim, got %d", claimed)
 	}
 }

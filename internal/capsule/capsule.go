@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"kyrecovery-server/internal/crypto"
@@ -55,7 +56,7 @@ type PackOptions struct {
 	Dependencies []Dependency
 	Threshold    int
 	TotalShares  int
-	Passphrase   string            // optional secondary password protection
+	Passphrase   string // optional secondary password protection
 }
 
 // PackResult contains the packed capsule bytes, master key, shares, and manifest.
@@ -324,13 +325,26 @@ func ReadManifest(capsuleBytes []byte) (*Manifest, error) {
 	return nil, errors.New("manifest.json not found in capsule")
 }
 
+// SafeJoin resolves relPath inside baseDir, refusing entries that escape it.
+// Capsule contents come from paired clients, so every extraction path goes through here.
+func SafeJoin(baseDir, relPath string) (string, error) {
+	destPath := filepath.Join(baseDir, relPath)
+	if destPath != baseDir && !strings.HasPrefix(destPath, baseDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("unsafe capsule path escapes target directory: %s", relPath)
+	}
+	return destPath, nil
+}
+
 // ExtractToDirectory writes extracted files to a target directory.
 func ExtractToDirectory(files map[string][]byte, targetDir string) error {
 	if err := os.MkdirAll(targetDir, 0700); err != nil {
 		return err
 	}
 	for relPath, content := range files {
-		destPath := filepath.Join(targetDir, relPath)
+		destPath, err := SafeJoin(targetDir, relPath)
+		if err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(destPath), 0700); err != nil {
 			return err
 		}

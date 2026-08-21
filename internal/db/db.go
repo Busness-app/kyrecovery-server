@@ -518,10 +518,19 @@ func (d *DB) ClaimPairingCode(ctx context.Context, code, serviceName, appName st
 		return nil, errors.New("pairing code expired")
 	}
 
+	// The status and expiry guards live in the UPDATE so two concurrent claims of the same
+	// code cannot both mint a token; the checks above only shape the error message.
 	now := time.Now().UTC()
-	q := `UPDATE paired_apps SET status = 'paired', service_name = ?, app_name = ?, paired_at = ? WHERE id = ?`
-	if _, err := d.conn.ExecContext(ctx, q, serviceName, appName, now, app.ID); err != nil {
+	q := `UPDATE paired_apps SET status = 'paired', service_name = ?, app_name = ?, paired_at = ?
+	      WHERE id = ? AND status = 'pending' AND expires_at > ?`
+	res, err := d.conn.ExecContext(ctx, q, serviceName, appName, now, app.ID, now)
+	if err != nil {
 		return nil, err
+	}
+	if rows, err := res.RowsAffected(); err != nil {
+		return nil, err
+	} else if rows == 0 {
+		return nil, errors.New("pairing code already consumed")
 	}
 
 	app.Status = "paired"
