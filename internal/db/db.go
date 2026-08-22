@@ -11,6 +11,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"kyrecovery-server/internal/secrets"
 )
 
 // CapsuleRecord stores metadata for a stored capsule.
@@ -131,6 +133,7 @@ type ReplicationLogRecord struct {
 // DB wraps the SQLite database handle.
 type DB struct {
 	conn *sql.DB
+	keys *secrets.Keyring
 }
 
 // Open initializes or connects to SQLite at dbPath.
@@ -150,7 +153,19 @@ func Open(dbPath string) (*DB, error) {
 
 	conn.SetMaxOpenConns(1) // SQLite single-writer safety
 
-	database := &DB{conn: conn}
+	// Credentials are sealed with a key held outside the database, so a stolen
+	// copy of the database file is not a copy of the offsite storage credentials.
+	keyDir := ""
+	if dbPath != ":memory:" {
+		keyDir = filepath.Dir(dbPath)
+	}
+	keys, err := secrets.Load(keyDir)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	database := &DB{conn: conn, keys: keys}
 	if err := database.migrate(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("migration failed: %w", err)
@@ -158,6 +173,9 @@ func Open(dbPath string) (*DB, error) {
 
 	return database, nil
 }
+
+// Keyring returns the server keyring protecting at-rest secrets.
+func (d *DB) Keyring() *secrets.Keyring { return d.keys }
 
 // Close closes the database connection.
 func (d *DB) Close() error {
@@ -439,6 +457,15 @@ func (d *DB) InsertAuditEvent(ctx context.Context, ar AuditRecord) error {
 	return err
 }
 
+// UpdateAuditEventHashes rewrites the chain linkage of an existing audit event.
+// It changes no event content: it is used only to re-authenticate an existing
+// chain under the server ledger key.
+func (d *DB) UpdateAuditEventHashes(ctx context.Context, seq int64, prevHash, eventHash string) error {
+	q := `UPDATE audit_events SET prev_hash = ?, event_hash = ? WHERE sequence_num = ?`
+	_, err := d.conn.ExecContext(ctx, q, prevHash, eventHash, seq)
+	return err
+}
+
 // ListAuditEvents returns audit events in chronological or reverse-chronological order.
 func (d *DB) ListAuditEvents(ctx context.Context, limit int) ([]AuditRecord, error) {
 	if limit <= 0 {
@@ -621,7 +648,11 @@ func (d *DB) InsertReplicationTarget(ctx context.Context, t ReplicationTargetRec
 	if t.AutoSync {
 		autoSyncInt = 1
 	}
-	_, err := d.conn.ExecContext(ctx, q, t.ID, t.Name, t.Type, t.Endpoint, t.Bucket, t.Region, t.AccessKey, t.SecretKey, t.Prefix, autoSyncInt, t.Status, t.LastSyncAt, t.CreatedAt.UTC())
+	sealedSecret, err := d.keys.Seal(t.SecretKey)
+	if err != nil {
+		return fmt.Errorf("failed sealing replication secret key: %w", err)
+	}
+	_, err = d.conn.ExecContext(ctx, q, t.ID, t.Name, t.Type, t.Endpoint, t.Bucket, t.Region, t.AccessKey, sealedSecret, t.Prefix, autoSyncInt, t.Status, t.LastSyncAt, t.CreatedAt.UTC())
 	return err
 }
 
@@ -632,13 +663,17 @@ func (d *DB) GetReplicationTarget(ctx context.Context, id string) (*ReplicationT
 	row := d.conn.QueryRowContext(ctx, q, id)
 	var t ReplicationTargetRecord
 	var autoSyncInt int
-	if err := row.Scan(&t.ID, &t.Name, &t.Type, &t.Endpoint, &t.Bucket, &t.Region, &t.AccessKey, &t.SecretKey, &t.Prefix, &autoSyncInt, &t.Status, &t.LastSyncAt, &t.CreatedAt); err != nil {
+	var err error
+	if err = row.Scan(&t.ID, &t.Name, &t.Type, &t.Endpoint, &t.Bucket, &t.Region, &t.AccessKey, &t.SecretKey, &t.Prefix, &autoSyncInt, &t.Status, &t.LastSyncAt, &t.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	t.AutoSync = autoSyncInt == 1
+	if t.SecretKey, err = d.keys.Open(t.SecretKey); err != nil {
+		return nil, err
+	}
 	return &t, nil
 }
 
@@ -660,6 +695,9 @@ func (d *DB) ListReplicationTargets(ctx context.Context) ([]ReplicationTargetRec
 			return nil, err
 		}
 		t.AutoSync = autoSyncInt == 1
+		if t.SecretKey, err = d.keys.Open(t.SecretKey); err != nil {
+			return nil, err
+		}
 		list = append(list, t)
 	}
 	return list, rows.Err()
@@ -801,4 +839,3 @@ func (d *DB) GetAllSettings(ctx context.Context) (map[string]string, error) {
 	}
 	return settings, rows.Err()
 }
-

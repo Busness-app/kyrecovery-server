@@ -1,0 +1,183 @@
+// Package secrets manages the server key that protects credentials stored in SQLite.
+//
+// The key lives outside the database — in KYRECOVERY_SECRET_KEY or in a 0600 key file
+// beside it — so a stolen database (or a replicated copy of one) yields no usable
+// credentials. It does not protect against an attacker who already has the data
+// directory or the running process.
+package secrets
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/crypto/hkdf"
+
+	"crypto/sha256"
+
+	"kyrecovery-server/internal/crypto"
+)
+
+// EnvKey overrides the on-disk key file. Value must be 32 bytes, hex or base64.
+const EnvKey = "KYRECOVERY_SECRET_KEY"
+
+// KeyFileName is the key file created next to the SQLite database.
+const KeyFileName = "secret.key"
+
+const sealedPrefix = "enc:v1:"
+
+// KeyedMarkerName records that the audit ledger has been re-keyed, so unkeyed
+// event hashes are never accepted again.
+const KeyedMarkerName = "ledger.keyed"
+
+// Keyring derives purpose-specific keys from a single 256-bit server key.
+type Keyring struct {
+	master []byte
+	dir    string
+}
+
+// Load returns the keyring for dataDir, creating a new key file on first run.
+// An empty dataDir yields an ephemeral key (in-memory databases only).
+func Load(dataDir string) (*Keyring, error) {
+	if env := strings.TrimSpace(os.Getenv(EnvKey)); env != "" {
+		key, err := decodeKey(env)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", EnvKey, err)
+		}
+		return &Keyring{master: key, dir: dataDir}, nil
+	}
+	if dataDir == "" {
+		return Ephemeral()
+	}
+
+	path := filepath.Join(dataDir, KeyFileName)
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		key, err := decodeKey(strings.TrimSpace(string(raw)))
+		if err != nil {
+			return nil, fmt.Errorf("invalid key file %s: %w", path, err)
+		}
+		return &Keyring{master: key, dir: dataDir}, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed reading key file %s: %w", path, err)
+	}
+
+	key, err := crypto.GenerateMasterKey()
+	if err != nil {
+		return nil, err
+	}
+	if err := writeNewKeyFile(path, key); err != nil {
+		return nil, err
+	}
+	return &Keyring{master: key, dir: dataDir}, nil
+}
+
+// LedgerKeyed reports whether the audit ledger is known to be fully keyed. A
+// keyring with nowhere to persist state (an in-memory database) is treated as
+// keyed: there is no pre-existing chain to migrate.
+func (k *Keyring) LedgerKeyed() bool {
+	if k.dir == "" {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(k.dir, KeyedMarkerName))
+	return err == nil
+}
+
+// MarkLedgerKeyed records, outside the database, that every audit event is
+// authenticated with the ledger key.
+func (k *Keyring) MarkLedgerKeyed() error {
+	if k.dir == "" {
+		return nil
+	}
+	path := filepath.Join(k.dir, KeyedMarkerName)
+	if err := os.WriteFile(path, []byte("1\n"), 0600); err != nil {
+		return fmt.Errorf("failed marking ledger as keyed: %w", err)
+	}
+	return nil
+}
+
+// Ephemeral returns a keyring backed by a random key that is never persisted.
+func Ephemeral() (*Keyring, error) {
+	key, err := crypto.GenerateMasterKey()
+	if err != nil {
+		return nil, err
+	}
+	return &Keyring{master: key}, nil
+}
+
+// writeNewKeyFile creates path exclusively so a concurrent starter cannot lose its key.
+func writeNewKeyFile(path string, key []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("failed creating key file %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
+		return fmt.Errorf("failed writing key file %s: %w", path, err)
+	}
+	return f.Sync()
+}
+
+func decodeKey(s string) ([]byte, error) {
+	if key, err := hex.DecodeString(s); err == nil && len(key) == crypto.KeyLength {
+		return key, nil
+	}
+	if key, err := base64.StdEncoding.DecodeString(s); err == nil && len(key) == crypto.KeyLength {
+		return key, nil
+	}
+	return nil, fmt.Errorf("expected %d bytes as hex or base64", crypto.KeyLength)
+}
+
+func (k *Keyring) derive(info string) []byte {
+	out := make([]byte, crypto.KeyLength)
+	r := hkdf.New(sha256.New, k.master, nil, []byte(info))
+	if _, err := io.ReadFull(r, out); err != nil {
+		panic("secrets: hkdf failed: " + err.Error()) // sha256 HKDF cannot fail for 32 bytes
+	}
+	return out
+}
+
+// LedgerKey returns the HMAC key that binds audit events to this server.
+func (k *Keyring) LedgerKey() []byte {
+	return k.derive("kyrecovery/audit-ledger/v1")
+}
+
+// Seal encrypts a stored credential. Empty and already-sealed values pass through.
+func (k *Keyring) Seal(plaintext string) (string, error) {
+	if plaintext == "" || IsSealed(plaintext) {
+		return plaintext, nil
+	}
+	ct, nonce, err := crypto.EncryptAESGCM([]byte(plaintext), k.derive("kyrecovery/db-secrets/v1"), nil)
+	if err != nil {
+		return "", err
+	}
+	return sealedPrefix + base64.StdEncoding.EncodeToString(append(nonce, ct...)), nil
+}
+
+// Open decrypts a value produced by Seal. Values written before encryption existed
+// are returned unchanged so upgrades do not lose credentials.
+func (k *Keyring) Open(stored string) (string, error) {
+	if !IsSealed(stored) {
+		return stored, nil
+	}
+	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, sealedPrefix))
+	if err != nil || len(blob) <= crypto.NonceLength {
+		return "", errors.New("corrupt sealed secret")
+	}
+	pt, err := crypto.DecryptAESGCM(blob[crypto.NonceLength:], k.derive("kyrecovery/db-secrets/v1"), blob[:crypto.NonceLength], nil)
+	if err != nil {
+		return "", fmt.Errorf("failed decrypting stored secret (wrong %s or key file?): %w", EnvKey, err)
+	}
+	return string(pt), nil
+}
+
+// IsSealed reports whether a stored value is already encrypted.
+func IsSealed(s string) bool {
+	return strings.HasPrefix(s, sealedPrefix)
+}
