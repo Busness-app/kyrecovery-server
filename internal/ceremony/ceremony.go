@@ -29,51 +29,96 @@ type Participant struct {
 
 // Session represents an ephemeral in-memory quorum gathering session.
 type Session struct {
-	ID              string         `json:"id"`
-	CapsuleID       string         `json:"capsule_id"`
-	ServiceName     string         `json:"service_name"`
-	Purpose         string         `json:"purpose"`
-	Initiator       string         `json:"initiator"`
-	Threshold       int            `json:"threshold"`
-	TotalShares     int            `json:"total_shares"`
-	Status          CeremonyStatus `json:"status"`
-	Participants    []Participant  `json:"participants"`
-	SubmittedCount  int            `json:"submitted_count"`
-	CreatedAt       time.Time      `json:"created_at"`
-	ExpiresAt       time.Time      `json:"expires_at"`
-	
+	ID             string         `json:"id"`
+	CapsuleID      string         `json:"capsule_id"`
+	ServiceName    string         `json:"service_name"`
+	Purpose        string         `json:"purpose"`
+	Initiator      string         `json:"initiator"`
+	Threshold      int            `json:"threshold"`
+	TotalShares    int            `json:"total_shares"`
+	Status         CeremonyStatus `json:"status"`
+	Participants   []Participant  `json:"participants"`
+	SubmittedCount int            `json:"submitted_count"`
+	CreatedAt      time.Time      `json:"created_at"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+
 	// Ephemeral in-memory share storage (strictly in RAM, wiped on completion/expiration)
-	shares []crypto.Share
+	shares  []crypto.Share
+	endedAt time.Time // set when the ceremony reaches a terminal state
 }
+
+// publicCopy returns a snapshot safe to hand to a caller: no shares, and no
+// aliasing of state the reaper may mutate concurrently.
+func (s *Session) publicCopy() *Session {
+	c := *s
+	c.shares = nil
+	c.Participants = append([]Participant(nil), s.Participants...)
+	return &c
+}
+
+// terminalRetention is how long a finished ceremony stays listable before its
+// metadata (who held which share index, and when) is dropped.
+const terminalRetention = 1 * time.Hour
 
 // Manager coordinates in-memory recovery quorum ceremonies.
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	done     chan struct{}
+	closed   sync.Once
 }
 
-// NewManager creates a new ceremony manager.
+// NewManager creates a new ceremony manager. Call Close to stop its reaper.
 func NewManager() *Manager {
 	m := &Manager{
 		sessions: make(map[string]*Session),
+		done:     make(chan struct{}),
 	}
-	// Background reaper for expired sessions
 	go m.reaperLoop()
 	return m
 }
 
+// Close stops the background reaper and wipes every in-memory share.
+func (m *Manager) Close() {
+	m.closed.Do(func() {
+		close(m.done)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for id, s := range m.sessions {
+			m.scrubSessionShares(s)
+			delete(m.sessions, id)
+		}
+	})
+}
+
 func (m *Manager) reaperLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
-	for range ticker.C {
-		m.mu.Lock()
-		now := time.Now().UTC()
-		for _, s := range m.sessions {
-			if s.Status == StatusGathering && now.After(s.ExpiresAt) {
-				s.Status = StatusExpired
-				m.scrubSessionShares(s)
-			}
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			m.reap(time.Now().UTC())
 		}
-		m.mu.Unlock()
+	}
+}
+
+// reap expires overdue ceremonies and forgets finished ones, so a long-running
+// server does not accumulate ceremony metadata without bound.
+func (m *Manager) reap(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, s := range m.sessions {
+		if s.Status == StatusGathering && now.After(s.ExpiresAt) {
+			s.Status = StatusExpired
+			s.endedAt = now
+			m.scrubSessionShares(s)
+		}
+		if !s.endedAt.IsZero() && now.Sub(s.endedAt) > terminalRetention {
+			delete(m.sessions, id)
+		}
 	}
 }
 
@@ -109,7 +154,7 @@ func (m *Manager) CreateSession(capsuleID, serviceName, purpose, initiator strin
 	}
 
 	m.sessions[sessionID] = sess
-	return sess, nil
+	return sess.publicCopy(), nil
 }
 
 // GetSession returns a safe public view of the ceremony session.
@@ -121,9 +166,7 @@ func (m *Manager) GetSession(id string) (*Session, error) {
 	if !exists {
 		return nil, errors.New("ceremony session not found")
 	}
-
-	// Return shallow copy without raw shares
-	return s, nil
+	return s.publicCopy(), nil
 }
 
 // ListSessions returns all active or recent ceremonies.
@@ -133,7 +176,7 @@ func (m *Manager) ListSessions() []*Session {
 
 	var list []*Session
 	for _, s := range m.sessions {
-		list = append(list, s)
+		list = append(list, s.publicCopy())
 	}
 	return list
 }
@@ -154,6 +197,7 @@ func (m *Manager) SubmitShare(sessionID, custodianName, rawShare string) (*Sessi
 
 	if time.Now().UTC().After(s.ExpiresAt) {
 		s.Status = StatusExpired
+		s.endedAt = time.Now().UTC()
 		m.scrubSessionShares(s)
 		return nil, errors.New("ceremony has expired")
 	}
@@ -182,7 +226,7 @@ func (m *Manager) SubmitShare(sessionID, custodianName, rawShare string) (*Sessi
 		s.Status = StatusQuorumReached
 	}
 
-	return s, nil
+	return s.publicCopy(), nil
 }
 
 // GetReconstructedKey combines the submitted shares if quorum is satisfied.
@@ -216,6 +260,7 @@ func (m *Manager) CompleteSession(sessionID string) error {
 	}
 
 	s.Status = StatusExecuted
+	s.endedAt = time.Now().UTC()
 	m.scrubSessionShares(s)
 	return nil
 }
@@ -231,6 +276,7 @@ func (m *Manager) CancelSession(sessionID string) error {
 	}
 
 	s.Status = StatusCancelled
+	s.endedAt = time.Now().UTC()
 	m.scrubSessionShares(s)
 	return nil
 }
