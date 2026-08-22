@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -142,6 +143,23 @@ func (g *GenericAdapter) shouldInclude(relPath string, includePaths []string) bo
 	return false
 }
 
+// sandboxPath resolves a path named by a verification recipe inside the drill
+// sandbox. Recipes arrive from the pushing product, so they are untrusted input
+// exactly like capsule entries are, and go through the same check.
+func sandboxPath(extractedDir, rel string) (string, error) {
+	return capsule.SafeJoin(extractedDir, rel)
+}
+
+// escapedCheck reports a recipe path that tried to leave the sandbox. The drill
+// fails: a recipe that cannot be evaluated has not verified anything.
+func escapedCheck(name, rel string) CheckItem {
+	return CheckItem{
+		Name:    fmt.Sprintf("%s:%s", name, rel),
+		Passed:  false,
+		Message: "Recipe path escapes the drill sandbox and was not evaluated",
+	}
+}
+
 // VerifyRestore inspects the restored generic payload using automated recipe verification rules.
 func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string, manifest *capsule.Manifest) (*DrillResult, error) {
 	result := &DrillResult{
@@ -166,7 +184,12 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 
 	// 1. Required Files Check
 	for _, reqFile := range recipe.VerifyChecks.RequiredFiles {
-		p := filepath.Join(extractedDir, reqFile)
+		p, err := sandboxPath(extractedDir, reqFile)
+		if err != nil {
+			result.Passed = false
+			result.Checks = append(result.Checks, escapedCheck("required_file", reqFile))
+			continue
+		}
 		info, err := os.Stat(p)
 		switch {
 		case err != nil:
@@ -196,7 +219,13 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 	// 1b. Databases named explicitly by the recipe
 	if recipe.VerifyChecks.CheckSQLiteIntegrity {
 		for _, relPath := range recipe.VerifyChecks.SQLitePaths {
-			ok, msg := checkSQLiteIntegrity(ctx, filepath.Join(extractedDir, relPath))
+			dbPath, err := sandboxPath(extractedDir, relPath)
+			if err != nil {
+				result.Passed = false
+				result.Checks = append(result.Checks, escapedCheck("sqlite_check", relPath))
+				continue
+			}
+			ok, msg := checkSQLiteIntegrity(ctx, dbPath)
 			checkedDBs[relPath] = true
 			if !ok {
 				result.Passed = false
@@ -344,15 +373,21 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 
 	// 5. Prove the declared signing key still signs and verifies
 	if keyPath := recipe.VerifyChecks.TestSigningKeyPath; keyPath != "" {
-		ok, msg := testSigningKey(filepath.Join(extractedDir, keyPath), recipe.VerifyChecks.SigningAlgorithm)
-		if !ok {
+		p, err := sandboxPath(extractedDir, keyPath)
+		if err != nil {
 			result.Passed = false
+			result.Checks = append(result.Checks, escapedCheck("signing_key", keyPath))
+		} else {
+			ok, msg := testSigningKey(p, recipe.VerifyChecks.SigningAlgorithm)
+			if !ok {
+				result.Passed = false
+			}
+			result.Checks = append(result.Checks, CheckItem{
+				Name:    fmt.Sprintf("signing_key:%s", keyPath),
+				Passed:  ok,
+				Message: msg,
+			})
 		}
-		result.Checks = append(result.Checks, CheckItem{
-			Name:    fmt.Sprintf("signing_key:%s", keyPath),
-			Passed:  ok,
-			Message: msg,
-		})
 	}
 
 	// 6. Declared environment variables and ports must survive in the capsule manifest
@@ -402,7 +437,10 @@ func (g *GenericAdapter) VerifyRestore(ctx context.Context, extractedDir string,
 
 // checkSQLiteIntegrity runs PRAGMA integrity_check against a restored database file.
 func checkSQLiteIntegrity(ctx context.Context, path string) (bool, string) {
-	conn, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=query_only(true)", path))
+	// Built with url.URL rather than concatenated: a "?" in a recipe-supplied
+	// file name must not be able to append its own connection parameters.
+	dsn := (&url.URL{Path: path, RawQuery: "_pragma=query_only(true)"}).String()
+	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return false, fmt.Sprintf("Failed opening SQLite DB: %v", err)
 	}

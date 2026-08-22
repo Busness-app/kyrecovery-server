@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ type Server struct {
 	claimLimit  *rateLimiter
 	loginLimit  *rateLimiter
 	pushLimit   *rateLimiter
+	pushSlots   chan struct{}
 	mux         *http.ServeMux
 }
 
@@ -103,6 +105,7 @@ func New(cfg Config, database *db.DB, ledger *audit.Ledger) (*Server, error) {
 		claimLimit:  newRateLimiter(claimWindow),
 		loginLimit:  newRateLimiter(loginWindow),
 		pushLimit:   newRateLimiter(pushWindow),
+		pushSlots:   make(chan struct{}, maxConcurrentPushes),
 		mux:         http.NewServeMux(),
 	}
 
@@ -194,6 +197,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/capsules/timeline", s.handleCapsuleTimeline)
 }
 
+// contentSecurityPolicy is the second line of defence behind escaping in the
+// dashboard: even if a value reaches innerHTML unescaped, injected markup cannot
+// load or reach anything off-origin.
+//
+// ponytail: 'unsafe-inline' for scripts is here only because the dashboard still
+// wires buttons with inline onclick=. Move those to addEventListener and drop it.
+const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; " +
+	"form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
 // rolePublic marks a route reachable without a session: it is needed to sign in,
 // or it carries its own credential (a pairing code or a product API token).
 const rolePublic = ""
@@ -244,20 +257,34 @@ var apiPolicy = map[string]string{
 	"POST /api/replication/targets/test": auth.RoleAdmin,
 }
 
+// parseCapsulePath is the single interpretation of an "/api/capsules/<id>/<action>"
+// URL. requiredRole and handleCapsuleDetail must never disagree about what a URL
+// means, so they both read it through here rather than matching substrings.
+func parseCapsulePath(urlPath string) (capsuleID, action string) {
+	parts := strings.Split(strings.Trim(urlPath, "/"), "/")
+	if len(parts) < 3 {
+		return "", ""
+	}
+	if len(parts) >= 4 {
+		return parts[2], parts[3]
+	}
+	return parts[2], ""
+}
+
 // requiredRole returns the minimum role needed for an API request.
-func requiredRole(method, path string) string {
-	if role, ok := apiPolicy[method+" "+path]; ok {
+func requiredRole(method, urlPath string) string {
+	if role, ok := apiPolicy[method+" "+urlPath]; ok {
 		return role
 	}
-	if role, ok := apiPolicy["* "+path]; ok {
+	if role, ok := apiPolicy["* "+urlPath]; ok {
 		return role
 	}
 
 	// Capsule sub-resources: reading metadata is a viewer action, taking the
 	// ciphertext or the runbook off the server is not.
-	if strings.HasPrefix(path, "/api/capsules/") && method == http.MethodGet {
-		switch {
-		case strings.HasSuffix(path, "/download"), strings.HasSuffix(path, "/export-kit"):
+	if strings.HasPrefix(urlPath, "/api/capsules/") && method == http.MethodGet {
+		switch _, action := parseCapsulePath(urlPath); action {
+		case "download", "export-kit":
 			return auth.RoleOperator
 		default:
 			return auth.RoleViewer
@@ -271,6 +298,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 	if r.TLS != nil {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
@@ -279,6 +307,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r.URL.Path))
+
+		// An API path must be spelled the way it is meant, so the policy lookup
+		// below and the handler that runs afterwards cannot read the same URL
+		// differently. path.Clean removes trailing slashes, dot segments and
+		// repeated separators; anything it changes is rejected rather than guessed at.
+		if path.Clean(r.URL.Path) != r.URL.Path {
+			writeError(w, http.StatusBadRequest, "Bad Request: path is not canonical")
+			return
+		}
 
 		if required := requiredRole(r.Method, r.URL.Path); required != rolePublic {
 			session, err := s.authMgr.GetSession(r.Context(), r)
@@ -309,6 +346,23 @@ func (s *Server) cookieSecure(r *http.Request) bool {
 		return true
 	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// actor names the authenticated identity behind a request for the audit ledger.
+// A caller-supplied name is never used here: an attacker who could choose it
+// could write any actor they liked into the record of what they did.
+func (s *Server) actor(r *http.Request) string {
+	session, err := s.authMgr.GetSession(r.Context(), r)
+	if err != nil || session == nil {
+		return "anonymous"
+	}
+	if session.Email != "" {
+		return session.Email
+	}
+	if session.Name != "" {
+		return session.Name
+	}
+	return session.UserID
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -437,7 +491,7 @@ func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Record in audit ledger
-	_, _ = s.ledger.Record(ctx, "capsule_captured", "operator", capsuleID, map[string]interface{}{
+	_, _ = s.ledger.Record(ctx, "capsule_captured", s.actor(r), capsuleID, map[string]interface{}{
 		"service":      req.ServiceName,
 		"threshold":    req.Threshold,
 		"total_shares": req.TotalShares,
@@ -469,15 +523,10 @@ func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
 
 // 4. Capsule Detail / Download / Export
 func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 3 {
+	capsuleID, action := parseCapsulePath(r.URL.Path)
+	if capsuleID == "" {
 		writeError(w, http.StatusBadRequest, "Invalid capsule URL")
 		return
-	}
-	capsuleID := parts[2]
-	action := ""
-	if len(parts) >= 4 {
-		action = parts[3]
 	}
 
 	ctx := r.Context()
@@ -527,7 +576,7 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 			LastDrill:    lastDrill,
 		}
 
-		_, _ = s.ledger.Record(ctx, "kit_exported", "operator", capsuleID, map[string]interface{}{"format": format})
+		_, _ = s.ledger.Record(ctx, "kit_exported", s.actor(r), capsuleID, map[string]interface{}{"format": format})
 
 		if format == "md" {
 			md := export.GenerateMarkdownRunbook(kitData)
@@ -590,7 +639,7 @@ func (s *Server) handleCustodians(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, _ = s.ledger.Record(ctx, "custodian_added", "admin", custID, map[string]interface{}{
+		_, _ = s.ledger.Record(ctx, "custodian_added", s.actor(r), custID, map[string]interface{}{
 			"name":        req.Name,
 			"email":       req.Email,
 			"fingerprint": fingerprint,
@@ -660,7 +709,7 @@ func (s *Server) handleRunDrill(w http.ResponseWriter, r *http.Request) {
 		CapsuleID:    req.CapsuleID,
 		CapsuleBytes: capsuleBytes,
 		Shares:       parsedShares,
-		Actor:        "web-operator",
+		Actor:        s.actor(r),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Drill execution failed: %v", err))
@@ -722,6 +771,12 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 	if req.TTLMinutes > 0 {
 		ttl = time.Duration(req.TTLMinutes) * time.Minute
 	}
+	// A six-digit code is only as strong as the window it is guessable in.
+	if ttl > maxPairingTTL {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("ttl_minutes cannot exceed %d", int(maxPairingTTL.Minutes())))
+		return
+	}
 
 	record, err := pairing.GeneratePairingCode(r.Context(), s.db, ttl, req.ServiceName, req.AppName)
 	if err != nil {
@@ -729,11 +784,21 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = s.ledger.Record(r.Context(), "pairing_code_generated", "admin", record.PairingCode, map[string]interface{}{
+	_, _ = s.ledger.Record(r.Context(), "pairing_code_generated", s.actor(r), record.ID, map[string]interface{}{
 		"expires_at": record.ExpiresAt,
 	})
 
-	writeJSON(w, http.StatusOK, record)
+	// The record also carries the API token, which belongs to the product that
+	// claims the code, not to the administrator who generated it.
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":           record.ID,
+		"service_name": record.ServiceName,
+		"app_name":     record.AppName,
+		"pairing_code": record.PairingCode,
+		"status":       record.Status,
+		"expires_at":   record.ExpiresAt,
+		"created_at":   record.CreatedAt,
+	})
 }
 
 // 11. Pairing List
@@ -769,7 +834,7 @@ func (s *Server) handlePairingRevoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.ledger.Record(r.Context(), "pairing_token_revoked", "admin", req.ID, nil)
+	_, _ = s.ledger.Record(r.Context(), "pairing_token_revoked", s.actor(r), req.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
@@ -823,9 +888,10 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = s.ledger.Record(r.Context(), "product_paired", req.AppName, app.ID, map[string]interface{}{
-		"service_name": app.ServiceName,
-		"app_name":     app.AppName,
+	_, _ = s.ledger.Record(r.Context(), "product_paired", "pairing-code:"+app.ID, app.ID, map[string]interface{}{
+		"service_name":     app.ServiceName,
+		"claimed_app_name": app.AppName,
+		"source_address":   clientIP(r),
 	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -868,6 +934,16 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pushLimit.record(pushKey, now)
+
+	// Each push holds its payload in memory several times over. Queue rather than
+	// reject: a legitimate product retrying is not the problem being solved here.
+	select {
+	case s.pushSlots <- struct{}{}:
+		defer func() { <-s.pushSlots }()
+	case <-ctx.Done():
+		writeError(w, http.StatusServiceUnavailable, "Server busy ingesting backups; retry shortly")
+		return
+	}
 
 	var payload pairing.SelfDeclaredBackupPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -950,13 +1026,14 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 	go s.replication.SyncAllAutoTargets(context.Background(), capsuleID)
 
 	// Append to audit ledger
-	_, _ = s.ledger.Record(ctx, "self_declared_backup_ingested", app.AppName, capsuleID, map[string]interface{}{
-		"service":      payload.ServiceName,
-		"app_version":  payload.AppVersion,
-		"size_bytes":   capRec.SizeBytes,
-		"files_count":  len(rawFiles),
-		"threshold":    payload.Threshold,
-		"total_shares": payload.TotalShares,
+	_, _ = s.ledger.Record(ctx, "self_declared_backup_ingested", "paired-app:"+app.ID, capsuleID, map[string]interface{}{
+		"claimed_app_name": app.AppName,
+		"service":          payload.ServiceName,
+		"app_version":      payload.AppVersion,
+		"size_bytes":       capRec.SizeBytes,
+		"files_count":      len(rawFiles),
+		"threshold":        payload.Threshold,
+		"total_shares":     payload.TotalShares,
 	})
 
 	// Run automatic isolated verification drill with self-declared recipe
@@ -1087,7 +1164,8 @@ func (s *Server) handleAuthLoginLocal(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.loginLimit.record(ipKey, now)
 		s.loginLimit.record(accKey, now)
-		_, _ = s.ledger.Record(r.Context(), "user_login_failed", req.Username, clientIP(r), nil)
+		_, _ = s.ledger.Record(r.Context(), "user_login_failed", "anonymous", clientIP(r),
+			map[string]interface{}{"claimed_username": req.Username})
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
@@ -1158,6 +1236,12 @@ func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request
 	if err := s.db.UpdateUserPassword(r.Context(), user.ID, newHash, newSalt); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed updating password")
 		return
+	}
+
+	// Anyone signed in with the old password loses their session; the caller keeps
+	// the one they are changing it from.
+	if err := s.db.DeleteUserSessionsExcept(r.Context(), user.ID, session.ID); err != nil {
+		audit.Log().Error("session_revoke", session.Email, user.ID, "failed revoking other sessions", err)
 	}
 
 	_, _ = s.ledger.Record(r.Context(), "password_changed", user.Email, user.ID, nil)
@@ -1323,7 +1407,13 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"authenticated": true,
 		"sso_enabled":   s.authMgr.IsEnabled(),
-		"user":          session,
+		"user": map[string]interface{}{
+			"user_id":    session.UserID,
+			"email":      session.Email,
+			"name":       session.Name,
+			"role":       session.Role,
+			"expires_at": session.ExpiresAt,
+		},
 	})
 }
 
@@ -1380,10 +1470,7 @@ func (s *Server) handleCeremonyCreate(w http.ResponseWriter, r *http.Request) {
 		req.Purpose = "Quorum Verification Ceremony"
 	}
 
-	actor := "operator"
-	if session, _ := s.authMgr.GetSession(r.Context(), r); session != nil {
-		actor = session.Name
-	}
+	actor := s.actor(r)
 
 	sess, err := s.ceremonies.CreateSession(capRec.ID, capRec.ServiceName, req.Purpose, actor, capRec.Threshold, capRec.TotalShares, ttl)
 	if err != nil {
@@ -1430,9 +1517,10 @@ func (s *Server) handleCeremonySubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = s.ledger.Record(r.Context(), "custodian_share_submitted", req.CustodianName, req.SessionID, map[string]interface{}{
-		"submitted_count": sess.SubmittedCount,
-		"quorum_reached":  sess.Status == ceremony.StatusQuorumReached,
+	_, _ = s.ledger.Record(r.Context(), "custodian_share_submitted", s.actor(r), req.SessionID, map[string]interface{}{
+		"claimed_custodian_name": req.CustodianName,
+		"submitted_count":        sess.SubmittedCount,
+		"quorum_reached":         sess.Status == ceremony.StatusQuorumReached,
 	})
 
 	writeJSON(w, http.StatusOK, sess)
@@ -1522,7 +1610,7 @@ func (s *Server) handleCeremonyCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, _ = s.ledger.Record(r.Context(), "ceremony_cancelled", "operator", req.SessionID, nil)
+	_, _ = s.ledger.Record(r.Context(), "ceremony_cancelled", s.actor(r), req.SessionID, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
@@ -1575,7 +1663,7 @@ func (s *Server) handleReplicationTargets(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		_, _ = s.ledger.Record(ctx, "replication_target_saved", "operator", target.ID, map[string]interface{}{
+		_, _ = s.ledger.Record(ctx, "replication_target_saved", s.actor(r), target.ID, map[string]interface{}{
 			"name":      target.Name,
 			"type":      target.Type,
 			"endpoint":  target.Endpoint,
@@ -1629,7 +1717,7 @@ func (s *Server) handleReplicationTargetDelete(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.ledger.Record(r.Context(), "replication_target_deleted", "operator", targetID, nil)
+	_, _ = s.ledger.Record(r.Context(), "replication_target_deleted", s.actor(r), targetID, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

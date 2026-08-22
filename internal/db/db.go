@@ -19,7 +19,7 @@ import (
 type CapsuleRecord struct {
 	ID          string    `json:"id"`
 	ServiceName string    `json:"service_name"`
-	FilePath    string    `json:"file_path"`
+	FilePath    string    `json:"-"`
 	SizeBytes   int64     `json:"size_bytes"`
 	PayloadHash string    `json:"payload_hash"`
 	Threshold   int       `json:"threshold"`
@@ -65,12 +65,15 @@ type AuditRecord struct {
 }
 
 // PairedAppRecord represents a connected KySecurity or Business.app service.
+// APIToken and PairingCode are credentials, so they never serialise by default:
+// the pairing code is returned only by the admin route that generates it, and the
+// token only by the claim that mints it.
 type PairedAppRecord struct {
 	ID           string     `json:"id"`
 	ServiceName  string     `json:"service_name"`
 	AppName      string     `json:"app_name"`
-	APIToken     string     `json:"api_token"`
-	PairingCode  string     `json:"pairing_code"`
+	APIToken     string     `json:"-"`
+	PairingCode  string     `json:"-"`
 	Status       string     `json:"status"` // "pending", "paired", "revoked"
 	ExpiresAt    time.Time  `json:"expires_at"`
 	PairedAt     *time.Time `json:"paired_at,omitempty"`
@@ -90,9 +93,10 @@ type UserRecord struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// SessionRecord represents an authenticated user session.
+// SessionRecord represents an authenticated user session. ID is the bearer
+// credential the session cookie carries, so it is never serialised into a response.
 type SessionRecord struct {
-	ID        string    `json:"id"`
+	ID        string    `json:"-"`
 	UserID    string    `json:"user_id"`
 	Email     string    `json:"email"`
 	Name      string    `json:"name"`
@@ -627,6 +631,14 @@ func (d *DB) GetSession(ctx context.Context, id string) (*SessionRecord, error) 
 		return nil, nil
 	}
 	return &s, nil
+}
+
+// DeleteUserSessionsExcept ends every session belonging to a user apart from one,
+// so a password change cannot leave the old password's sessions alive.
+func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID, keepSessionID string) error {
+	q := `DELETE FROM sessions WHERE user_id = ? AND id != ?`
+	_, err := d.conn.ExecContext(ctx, q, userID, keepSessionID)
+	return err
 }
 
 // DeleteSession removes a session from SQLite.

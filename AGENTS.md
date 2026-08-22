@@ -25,6 +25,14 @@ KyRecovery Server is the self-hosted recovery and restore-verification service f
   `<data-dir>/secret.key` (0600) or `KYRECOVERY_SECRET_KEY`.
 - Every `/api/` route has an entry in `apiPolicy`; anything unlisted defaults to
   `admin`. New routes must be added to the table and to `TestRequiredRolePolicy`.
+- An `/api/` path is rejected unless it equals `path.Clean` of itself, and the
+  capsule policy and the capsule handler both read the URL through
+  `parseCapsulePath`. Authorization and dispatch must never parse a URL twice.
+- Credentials are never serialised by default. `PairedAppRecord.APIToken`,
+  `PairedAppRecord.PairingCode`, `SessionRecord.ID` and `CapsuleRecord.FilePath`
+  are `json:"-"`; the pairing code is returned only by `POST /api/pairing/generate`
+  and the token only by `POST /api/pairing/claim`, each building its response
+  explicitly.
 - An OIDC identity is only trusted after `verifier.Verify` accepts the ID token's
   signature, issuer, audience and expiry, and the login nonce matches. A failed
   ID token is never retried against `userinfo`; unknown role claims become `viewer`.
@@ -37,12 +45,24 @@ KyRecovery Server is the self-hosted recovery and restore-verification service f
   additionally bounded by file count and decoded size, and rate limited per token.
 - Session cookies are `HttpOnly`, and `Secure` whenever the login arrived over
   TLS or `--cookie-secure=true` is set. Session tokens are never returned in a
-  response body.
+  response body — `TestSessionTokenNeverAppearsInAResponseBody` checks the bodies,
+  not just the handler that used to leak one. Changing a password ends every other
+  session belonging to that user.
 - Drill scratch environments must be created with restricted permissions (`0700`) and securely scrubbed upon drill completion.
 - SQLite database transactions must be atomic and use WAL mode with foreign key constraints.
 - Sensitive HTTP responses must enforce `Cache-Control: no-store` and standard security headers.
 - Unauthenticated pairing claims are rate limited per source address and per code, and the claim's single-use and expiry guards live in the SQL `UPDATE`, not only in Go checks.
-- Capsule entries never resolve outside their restore directory: every extraction path goes through `capsule.SafeJoin`.
+- Capsule entries never resolve outside their restore directory: every extraction
+  path goes through `capsule.SafeJoin`, and so does every path a verification
+  recipe names (`required_files`, `sqlite_paths`, `test_signing_key_path`). A
+  recipe path that escapes fails the drill rather than being evaluated.
+- The audit ledger records a resolved identity. `Server.actor` derives it from the
+  session; a caller-supplied name goes in `details` under a `claimed_` key, never
+  in `actor`. `Ledger.Record` bounds the column as a last resort.
+- The dashboard escapes every value it interpolates into HTML — `esc` for markup,
+  `escJs` for a value inside an inline handler's JS string — and every response
+  carries a Content-Security-Policy. `TestEmbeddedDashboardEscapesEveryInnerHTMLSink`
+  reads the shipped asset and fails on a new unescaped sink.
 
 # Ponytail, lazy senior dev mode
 

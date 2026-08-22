@@ -130,9 +130,16 @@ func Split(secret []byte, threshold, total int) ([]Share, error) {
 	poly := make([]byte, threshold)
 	for byteIdx, secByte := range secret {
 		poly[0] = secByte
-		// Random coefficients for x^1 ... x^(threshold-1)
-		if _, err := rand.Read(poly[1:]); err != nil {
-			return nil, fmt.Errorf("failed to generate random coefficients: %w", err)
+		// Random coefficients for x^1 ... x^(threshold-1). The leading coefficient
+		// must be non-zero, otherwise the polynomial for this byte has a lower
+		// degree than the threshold and fewer shares than promised recover it.
+		for {
+			if _, err := rand.Read(poly[1:]); err != nil {
+				return nil, fmt.Errorf("failed to generate random coefficients: %w", err)
+			}
+			if poly[threshold-1] != 0 {
+				break
+			}
 		}
 
 		// Evaluate polynomial at x = 1 ... total

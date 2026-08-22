@@ -49,18 +49,40 @@ func (c *S3Client) PutObject(ctx context.Context, key string, data io.Reader, si
 	}
 
 	reqURL := c.buildURL(key)
-	bodyBytes, err := io.ReadAll(data)
-	if err != nil {
-		return fmt.Errorf("failed reading payload for upload: %w", err)
+
+	// SigV4 signs a hash of the body, so the body has to be read twice. A capsule
+	// is a file, so hash one pass and rewind rather than holding the whole archive
+	// in memory; anything not seekable falls back to buffering.
+	var (
+		body           io.Reader
+		payloadHashHex string
+	)
+	if seeker, ok := data.(io.ReadSeeker); ok {
+		h := sha256.New()
+		n, err := io.Copy(h, seeker)
+		if err != nil {
+			return fmt.Errorf("failed hashing payload for upload: %w", err)
+		}
+		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("failed rewinding payload for upload: %w", err)
+		}
+		payloadHashHex = hex.EncodeToString(h.Sum(nil))
+		size, body = n, seeker
+	} else {
+		bodyBytes, err := io.ReadAll(data)
+		if err != nil {
+			return fmt.Errorf("failed reading payload for upload: %w", err)
+		}
+		sum := sha256.Sum256(bodyBytes)
+		payloadHashHex = hex.EncodeToString(sum[:])
+		size, body = int64(len(bodyBytes)), bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, body)
 	if err != nil {
 		return err
 	}
-
-	payloadHash := sha256.Sum256(bodyBytes)
-	payloadHashHex := hex.EncodeToString(payloadHash[:])
+	req.ContentLength = size
 
 	now := time.Now().UTC()
 	dateStamp := now.Format("20060102")
@@ -71,7 +93,7 @@ func (c *S3Client) PutObject(ctx context.Context, key string, data io.Reader, si
 
 	req.Header.Set("Host", host)
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", size))
 	req.Header.Set("x-amz-date", amzDate)
 	req.Header.Set("x-amz-content-sha256", payloadHashHex)
 

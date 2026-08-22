@@ -61,17 +61,24 @@ sequenceDiagram
     "ttl_minutes": 15
   }
   ```
+- `ttl_minutes` defaults to 15 and may not exceed 60: a six-digit code is only as
+  strong as the window in which it stays guessable. A larger value is rejected
+  with `400 Bad Request`.
 - **Response** (`200 OK`):
   ```json
   {
     "id": "pair-1787019014811345071",
     "service_name": "kynotes",
+    "app_name": "Pending Service",
     "pairing_code": "849201",
     "status": "pending",
     "expires_at": "2026-08-18T02:25:14.811345071Z",
     "created_at": "2026-08-18T02:10:14.811345071Z"
   }
   ```
+  This is the only response that carries the pairing code. It is not returned by
+  `GET /api/pairing/list`, and the API token is not returned here — that belongs
+  to whichever product claims the code.
 
 ---
 
@@ -101,6 +108,9 @@ sequenceDiagram
   - `400 Bad Request`: Invalid or expired pairing code.
   - `409 Conflict`: Pairing code already claimed.
   - `429 Too Many Requests`: More than 10 claim attempts from one source address, or 5 for one code, within 15 minutes.
+
+  This is the only response that carries the API token. Store it; it cannot be
+  read back from KyRecovery afterwards.
 
 ---
 
@@ -145,11 +155,17 @@ sequenceDiagram
 `files` also accepts the compact form `{"data/notes.db": "<base64>"}`, and `dependencies` also accepts an explicit `[{name, type, required, description}]` array. Per-file `mode` is accepted but not applied: restored files are written `0600` inside the `0700` drill sandbox.
 
 - **Limits**:
+  - Every path in `files` and every path named by `verification_recipe`
+    (`required_files`, `sqlite_paths`, `test_signing_key_path`) is resolved inside
+    the drill sandbox. A path that escapes it — `../`, or an absolute path — is
+    not evaluated, and its check fails the drill.
   - `service_name` must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` — it becomes part of the capsule filename.
   - `total_shares` may not exceed 255, the ceiling of the GF(2^8) Shamir field.
   - The request body is capped at 64 MiB by default (`KYRECOVERY_MAX_BACKUP_BYTES` on the server).
   - At most 4096 files, 32 MiB decoded per file and 64 MiB decoded in total.
-  - At most 60 pushes per paired product per 15 minutes.
+  - At most 60 pushes per paired product per 15 minutes, and at most 4 pushes
+    being ingested at once across all products. A push beyond that waits for a
+    slot rather than being rejected.
 - **Error Codes**:
   - `400 Bad Request`: Malformed JSON, unsafe or invalid `service_name`, unsafe file path, or a limit above exceeded.
   - `401 Unauthorized`: Missing, invalid, or revoked bearer token.

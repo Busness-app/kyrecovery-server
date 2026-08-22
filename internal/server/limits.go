@@ -32,6 +32,14 @@ const (
 
 	pushWindow     = 15 * time.Minute
 	pushesPerToken = 60
+
+	// A push is held in memory several times over — base64 body, decoded files,
+	// tar buffer, ciphertext — so the ceiling that matters is how many run at
+	// once, not how many run per quarter hour.
+	maxConcurrentPushes = 4
+
+	// maxPairingTTL caps how long a six-digit code stays guessable.
+	maxPairingTTL = 60 * time.Minute
 )
 
 // serviceNamePattern is what may appear in a capsule ID, and therefore in a

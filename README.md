@@ -64,7 +64,12 @@ automatic secret rotation are later work.
 - **Roles.** Every API route is authorized against `viewer` < `operator` <
   `admin`. Viewers read; operators run captures, drills and ceremonies; admins
   change pairing, replication targets and SSO. An unrecognised role claim from an
-  identity provider is treated as `viewer`.
+  identity provider is treated as `viewer`. API paths must be canonical, so a URL
+  cannot mean one thing to the policy and another to the handler.
+- **Credentials.** A product API token is shown once, to the product that claims
+  the pairing code. A pairing code is shown once, to the administrator who
+  generates it, and is valid for at most an hour. Neither appears in the paired
+  products listing, and no response body contains a session token.
 - **Server key.** `<data-dir>/secret.key` (0600, or `KYRECOVERY_SECRET_KEY`)
   seals replication credentials and the SSO client secret, and keys the audit
   ledger. Back it up with the database — without it those secrets are
@@ -72,11 +77,19 @@ automatic secret rotation are later work.
   who already has the data directory.
 - **Transport.** Session cookies are `HttpOnly`, and `Secure` when the login
   arrived over TLS (directly or via `X-Forwarded-Proto`). Run KyRecovery behind
-  TLS and set `--cookie-secure=true` to make that unconditional.
+  TLS and set `--cookie-secure=true` to make that unconditional. Changing your
+  password signs out every other session on the account.
+- **Dashboard.** Values from the database are escaped before they are rendered,
+  and every response carries a Content-Security-Policy that keeps injected markup
+  from reaching anything off-origin.
 - **Limits.** API bodies are capped at 1 MiB; self-declared backup pushes at
-  `KYRECOVERY_MAX_BACKUP_BYTES` (64 MiB by default), 4096 files, and 60 pushes
-  per 15 minutes per paired product. KyRecovery does not yet reserve or enforce
-  free disk space for the capsule volume — size that volume for your retention.
+  `KYRECOVERY_MAX_BACKUP_BYTES` (64 MiB by default), 4096 files, 60 pushes per
+  15 minutes per paired product, and 4 pushes in flight at once. KyRecovery does
+  not yet reserve or enforce free disk space for the capsule volume — size that
+  volume for your retention.
+- **Drills.** A restore drill only reads what the capsule restored. Verification
+  recipes come from the pushing product, so every path one names is resolved
+  inside the drill sandbox; a recipe that reaches outside fails the drill.
 - **Drill cleanup.** Restored files are overwritten before deletion. On SSDs,
   copy-on-write filesystems and virtualised storage that reduces exposure but
   cannot guarantee the original blocks are gone.

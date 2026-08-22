@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,10 +202,36 @@ func (l *Ledger) eventHash(seq int64, prevHash, action, actor, targetID, details
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// maxActorLen bounds the actor column. It is generous for an e-mail address and
+// far short of anything worth smuggling through a renderer.
+const maxActorLen = 256
+
+// sanitizeActor bounds what may be recorded as an actor. Callers are expected to
+// pass a resolved identity, but the ledger is the last place to notice if one
+// ever passes a caller-supplied string, so control characters and unbounded
+// length stop here rather than at whatever renders the ledger later.
+func sanitizeActor(actor string) string {
+	actor = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, actor)
+	if len(actor) > maxActorLen {
+		actor = actor[:maxActorLen]
+	}
+	if actor == "" {
+		return "unknown"
+	}
+	return actor
+}
+
 // Record appends a new verified event to the tamper-evident chain and emits structured log.
 func (l *Ledger) Record(ctx context.Context, action, actor, targetID string, details map[string]interface{}) (*db.AuditRecord, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	actor = sanitizeActor(actor)
 
 	last, err := l.db.GetLastAuditEvent(ctx)
 	if err != nil {

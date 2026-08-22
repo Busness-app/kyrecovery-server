@@ -1,3 +1,16 @@
+// Every value below comes from the database, and some of it was typed by someone
+// who never authenticated. Two contexts, two escapes:
+//   esc   — HTML text and ordinary attribute values.
+//   escJs — a value that lands inside a JS string literal inside an attribute,
+//           i.e. onclick="fn('...')". HTML-escaping alone is not enough there:
+//           the browser decodes the entity before parsing the handler as script,
+//           so the quote has to be neutralised for JS first and for HTML second.
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const escJs = v => esc(String(v ?? '').replace(/[\\'"\r\n]/g, c =>
+  '\\' + ({ '\r': 'r', '\n': 'n' }[c] || c)));
+
 document.addEventListener('DOMContentLoaded', () => {
   initTabs();
   loadAuthUser();
@@ -83,16 +96,16 @@ async function loadCapsules() {
 
     tbody.innerHTML = capsules.map(c => `
       <tr>
-        <td><code>${c.id}</code></td>
-        <td><strong>${c.service_name}</strong></td>
-        <td><span class="status-pill ready">${c.threshold} of ${c.total_shares} Shares</span></td>
+        <td><code>${esc(c.id)}</code></td>
+        <td><strong>${esc(c.service_name)}</strong></td>
+        <td><span class="status-pill ready">${esc(c.threshold)} of ${esc(c.total_shares)} Shares</span></td>
         <td>${(c.size_bytes / 1024).toFixed(1)} KB</td>
-        <td><code title="${c.payload_hash}">${c.payload_hash.substring(0, 12)}...</code></td>
+        <td><code title="${esc(c.payload_hash)}">${esc(String(c.payload_hash).substring(0, 12))}...</code></td>
         <td>${new Date(c.created_at).toLocaleString()}</td>
         <td>
-          <button class="btn btn-secondary btn-sm" onclick="openDrillModal('${c.id}', ${c.threshold})">Run Drill</button>
-          <a class="btn btn-secondary btn-sm" href="/api/capsules/${c.id}/export-kit?format=html" target="_blank">Export Kit</a>
-          <a class="btn btn-secondary btn-sm" href="/api/capsules/${c.id}/download" download>Download</a>
+          <button class="btn btn-secondary btn-sm" onclick="openDrillModal('${escJs(c.id)}', ${Number(c.threshold) || 0})">Run Drill</button>
+          <a class="btn btn-secondary btn-sm" href="/api/capsules/${encodeURIComponent(c.id)}/export-kit?format=html" target="_blank">Export Kit</a>
+          <a class="btn btn-secondary btn-sm" href="/api/capsules/${encodeURIComponent(c.id)}/download" download>Download</a>
         </td>
       </tr>
     `).join('');
@@ -118,9 +131,9 @@ async function loadCustodians() {
 
     tbody.innerHTML = list.map(c => `
       <tr>
-        <td><strong>${c.name}</strong></td>
-        <td>${c.email}</td>
-        <td><code>${c.fingerprint}</code></td>
+        <td><strong>${esc(c.name)}</strong></td>
+        <td>${esc(c.email)}</td>
+        <td><code>${esc(c.fingerprint)}</code></td>
         <td>${new Date(c.created_at).toLocaleString()}</td>
       </tr>
     `).join('');
@@ -146,15 +159,15 @@ async function loadDrills() {
 
     tbody.innerHTML = drills.map(d => `
       <tr>
-        <td><code>${d.id}</code></td>
-        <td><code>${d.capsule_id}</code></td>
-        <td><strong>${d.service_name}</strong></td>
+        <td><code>${esc(d.id)}</code></td>
+        <td><code>${esc(d.capsule_id)}</code></td>
+        <td><strong>${esc(d.service_name)}</strong></td>
         <td>
           <span class="status-pill ${d.status === 'passed' ? 'ready' : 'warning'}">
-            <span class="dot"></span> ${d.status.toUpperCase()}
+            <span class="dot"></span> ${esc(String(d.status).toUpperCase())}
           </span>
         </td>
-        <td><strong>${d.duration_ms} ms</strong></td>
+        <td><strong>${Number(d.duration_ms) || 0} ms</strong></td>
         <td>${new Date(d.completed_at).toLocaleString()}</td>
       </tr>
     `).join('');
@@ -180,11 +193,11 @@ async function loadAudit() {
 
     tbody.innerHTML = events.map(e => `
       <tr>
-        <td><strong>#${e.sequence_num}</strong></td>
-        <td><code>${e.action}</code></td>
-        <td>${e.actor}</td>
-        <td><code>${e.target_id}</code></td>
-        <td><code title="${e.event_hash}">${e.event_hash.substring(0, 14)}...</code></td>
+        <td><strong>#${esc(e.sequence_num)}</strong></td>
+        <td><code>${esc(e.action)}</code></td>
+        <td>${esc(e.actor)}</td>
+        <td><code>${esc(e.target_id)}</code></td>
+        <td><code title="${esc(e.event_hash)}">${esc(String(e.event_hash).substring(0, 14))}...</code></td>
         <td>${new Date(e.created_at).toLocaleString()}</td>
       </tr>
     `).join('');
@@ -339,14 +352,14 @@ async function submitDrill(e) {
       <div class="check-item">
         <span class="check-badge ${c.passed ? 'pass' : 'fail'}">${c.passed ? 'PASS' : 'FAIL'}</span>
         <div>
-          <strong>${c.name}</strong>: ${c.message}
+          <strong>${esc(c.name)}</strong>: ${esc(c.message)}
         </div>
       </div>
     `).join('');
 
     resultBox.innerHTML = `
       <div style="margin-bottom: 12px; font-weight: bold; color: ${data.passed ? 'var(--accent-green)' : 'var(--accent-red)'}">
-        Result: ${data.passed ? 'VERIFICATION PASSED' : 'VERIFICATION FAILED'} (Duration: ${data.duration_ms} ms)
+        Result: ${data.passed ? 'VERIFICATION PASSED' : 'VERIFICATION FAILED'} (Duration: ${Number(data.duration_ms) || 0} ms)
       </div>
       <div>${checksHtml}</div>
     `;
@@ -379,14 +392,16 @@ async function loadPairing() {
 
     tbody.innerHTML = list.map(p => `
       <tr>
-        <td><strong>${p.app_name}</strong></td>
-        <td><code>${p.service_name}</code></td>
+        <td><strong>${esc(p.app_name)}</strong></td>
+        <td><code>${esc(p.service_name)}</code></td>
         <td>
-          ${p.status === 'pending' ? `<span style="font-family: var(--font-mono); font-size: 14px; font-weight: bold; color: var(--accent-cyan); background: var(--bg-card); padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-color);">${p.pairing_code}</span>` : `<code title="${p.api_token}">${p.api_token.substring(0, 16)}...</code>`}
+          ${p.status === 'pending'
+            ? `<span style="color: var(--text-dim); font-size: 12px;">Code shown once, when generated</span>`
+            : `<code style="color: var(--text-dim);">${esc(p.id)}</code>`}
         </td>
         <td>
           <span class="status-pill ${p.status === 'paired' ? 'ready' : (p.status === 'pending' ? 'warning' : 'danger')}">
-            <span class="dot"></span> ${p.status.toUpperCase()}
+            <span class="dot"></span> ${esc(String(p.status).toUpperCase())}
           </span>
         </td>
         <td>${p.last_backup_at ? new Date(p.last_backup_at).toLocaleString() : '<span style="color: var(--text-dim);">Never</span>'}</td>
@@ -736,18 +751,18 @@ async function loadCeremonies() {
       const isQuorum = s.status === 'quorum_reached';
       const isExecuted = s.status === 'executed';
       const isCancelled = s.status === 'cancelled' || s.status === 'expired';
-      const participantsStr = (s.participants || []).map(p => `<span class="pill-badge" title="Share Index ${p.share_index}">👤 ${p.custodian_name}</span>`).join(' ') || '<span style="color: var(--text-dim);">None yet</span>';
+      const participantsStr = (s.participants || []).map(p => `<span class="pill-badge" title="Share Index ${esc(p.share_index)}">👤 ${esc(p.custodian_name)}</span>`).join(' ') || '<span style="color: var(--text-dim);">None yet</span>';
 
       return `
         <tr>
           <td>
-            <strong>${s.purpose}</strong><br>
-            <code style="font-size: 11px;">${s.id}</code>
+            <strong>${esc(s.purpose)}</strong><br>
+            <code style="font-size: 11px;">${esc(s.id)}</code>
           </td>
-          <td><code>${s.capsule_id}</code></td>
+          <td><code>${esc(s.capsule_id)}</code></td>
           <td style="min-width: 140px;">
             <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">
-              ${s.submitted_count} / ${s.threshold} Shares (${pct}%)
+              ${esc(s.submitted_count)} / ${esc(s.threshold)} Shares (${pct}%)
             </div>
             <div style="background: var(--bg-card); height: 8px; border-radius: 4px; overflow: hidden; border: 1px solid var(--border-color);">
               <div style="background: ${isQuorum ? 'var(--accent-green)' : 'var(--accent-cyan)'}; width: ${pct}%; height: 100%; transition: width 0.3s ease;"></div>
@@ -755,17 +770,17 @@ async function loadCeremonies() {
           </td>
           <td>
             <span class="status-pill ${isExecuted ? 'ready' : (isQuorum ? 'ready' : (isCancelled ? 'danger' : 'warning'))}">
-              <span class="dot"></span> ${s.status.toUpperCase().replace('_', ' ')}
+              <span class="dot"></span> ${esc(String(s.status).toUpperCase().replace('_', ' '))}
             </span>
           </td>
           <td>${participantsStr}</td>
           <td><span style="font-size: 12px;">${new Date(s.expires_at).toLocaleTimeString()}</span></td>
           <td>
             ${s.status === 'gathering' ? `
-              <button class="btn btn-secondary btn-sm" onclick="openCeremonySubmitModal('${s.id}')">Contribute Share</button>
-              <button class="btn btn-sm" style="color: var(--accent-red); margin-left: 4px;" onclick="cancelCeremony('${s.id}')">Cancel</button>
+              <button class="btn btn-secondary btn-sm" onclick="openCeremonySubmitModal('${escJs(s.id)}')">Contribute Share</button>
+              <button class="btn btn-sm" style="color: var(--accent-red); margin-left: 4px;" onclick="cancelCeremony('${escJs(s.id)}')">Cancel</button>
             ` : (isQuorum ? `
-              <button class="btn btn-primary btn-sm" onclick="executeCeremony('${s.id}')">⚡ Execute Drill</button>
+              <button class="btn btn-primary btn-sm" onclick="executeCeremony('${escJs(s.id)}')">⚡ Execute Drill</button>
             ` : `<span style="color: var(--text-dim); font-size: 12px;">Closed</span>`)}
           </td>
         </tr>
@@ -787,7 +802,7 @@ async function openCeremonyCreateModal() {
       select.innerHTML = '<option value="">No capsules available</option>';
     } else {
       select.innerHTML = capsules.map(c => `
-        <option value="${c.id}">${c.id} (${c.service_name}, Quorum: ${c.threshold}/${c.total_shares})</option>
+        <option value="${esc(c.id)}">${esc(c.id)} (${esc(c.service_name)}, Quorum: ${esc(c.threshold)}/${esc(c.total_shares)})</option>
       `).join('');
     }
   } catch (err) {
@@ -921,10 +936,10 @@ async function loadReplicationTargets() {
 
     tbody.innerHTML = list.map(t => `
       <tr>
-        <td><strong>${t.name}</strong></td>
-        <td><span class="pill-badge">${t.type.toUpperCase()}</span></td>
+        <td><strong>${esc(t.name)}</strong></td>
+        <td><span class="pill-badge">${esc(String(t.type).toUpperCase())}</span></td>
         <td>
-          <code style="font-size: 12px;">${t.type === 'local' ? t.endpoint : (t.bucket + ' (' + t.region + ')')}</code>
+          <code style="font-size: 12px;">${esc(t.type === 'local' ? t.endpoint : (t.bucket + ' (' + t.region + ')'))}</code>
         </td>
         <td>
           <span class="status-pill ${t.auto_sync ? 'ready' : 'warning'}">
@@ -933,13 +948,13 @@ async function loadReplicationTargets() {
         </td>
         <td>
           <span class="status-pill ${t.status === 'active' ? 'ready' : (t.status === 'error' ? 'danger' : 'warning')}">
-            <span class="dot"></span> ${t.status.toUpperCase()}
+            <span class="dot"></span> ${esc(String(t.status).toUpperCase())}
           </span>
         </td>
         <td>${t.last_sync_at ? new Date(t.last_sync_at).toLocaleString() : '<span style="color: var(--text-dim);">Never</span>'}</td>
         <td>
-          <button class="btn btn-secondary btn-sm" onclick="syncAllToTarget('${t.id}')">Sync All</button>
-          <button class="btn btn-sm" style="color: var(--accent-red); margin-left: 4px;" onclick="deleteReplicationTarget('${t.id}')">Delete</button>
+          <button class="btn btn-secondary btn-sm" onclick="syncAllToTarget('${escJs(t.id)}')">Sync All</button>
+          <button class="btn btn-sm" style="color: var(--accent-red); margin-left: 4px;" onclick="deleteReplicationTarget('${escJs(t.id)}')">Delete</button>
         </td>
       </tr>
     `).join('');
@@ -965,13 +980,13 @@ async function loadReplicationLogs() {
     tbody.innerHTML = list.map(l => `
       <tr>
         <td><span style="font-size: 12px;">${new Date(l.created_at).toLocaleString()}</span></td>
-        <td><code>${l.target_id}</code></td>
-        <td><code>${l.capsule_id}</code></td>
+        <td><code>${esc(l.target_id)}</code></td>
+        <td><code>${esc(l.capsule_id)}</code></td>
         <td>${(l.bytes_transferred / 1024).toFixed(1)} KB</td>
-        <td>${l.duration_ms} ms</td>
+        <td>${Number(l.duration_ms) || 0} ms</td>
         <td>
           <span class="status-pill ${l.status === 'success' ? 'ready' : 'danger'}">
-            <span class="dot"></span> ${l.status.toUpperCase()}
+            <span class="dot"></span> ${esc(String(l.status).toUpperCase())}
           </span>
         </td>
       </tr>
@@ -1142,7 +1157,7 @@ async function openDiffModal() {
     }
 
     const optionsHTML = capsules.map(c => `
-      <option value="${c.id}">${c.id} (${c.service_name}, ${(c.size_bytes / 1024).toFixed(1)} KB, ${new Date(c.created_at).toLocaleTimeString()})</option>
+      <option value="${esc(c.id)}">${esc(c.id)} (${esc(c.service_name)}, ${(c.size_bytes / 1024).toFixed(1)} KB, ${new Date(c.created_at).toLocaleTimeString()})</option>
     `).join('');
 
     baseSelect.innerHTML = optionsHTML;
@@ -1223,11 +1238,11 @@ async function executeSnapshotDiff() {
 
         return `
           <tr>
-            <td><code>${f.path}</code></td>
-            <td><span class="status-pill ${pillClass}"><span class="dot"></span> ${f.status.toUpperCase()}</span></td>
-            <td>${f.old_size_bytes} B</td>
-            <td>${f.new_size_bytes} B</td>
-            <td style="font-family: var(--font-mono);">${deltaFormatted}</td>
+            <td><code>${esc(f.path)}</code></td>
+            <td><span class="status-pill ${pillClass}"><span class="dot"></span> ${esc(String(f.status).toUpperCase())}</span></td>
+            <td>${Number(f.old_size_bytes) || 0} B</td>
+            <td>${Number(f.new_size_bytes) || 0} B</td>
+            <td style="font-family: var(--font-mono);">${esc(deltaFormatted)}</td>
           </tr>
         `;
       }).join('');
@@ -1242,7 +1257,7 @@ async function executeSnapshotDiff() {
         let color = 'var(--text-dim)';
         if (d.status === 'added') color = 'var(--accent-green)';
         if (d.status === 'removed') color = 'var(--accent-red)';
-        return `<div style="margin-bottom: 4px;"><strong style="color: ${color};">[${d.status.toUpperCase()}]</strong> ${d.type.toUpperCase()}: <code>${d.name}</code></div>`;
+        return `<div style="margin-bottom: 4px;"><strong style="color: ${color};">[${esc(String(d.status).toUpperCase())}]</strong> ${esc(String(d.type).toUpperCase())}: <code>${esc(d.name)}</code></div>`;
       }).join('');
     }
 
