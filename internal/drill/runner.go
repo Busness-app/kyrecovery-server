@@ -48,17 +48,17 @@ type DrillParams struct {
 
 // DrillExecutionSummary contains detailed drill metrics and result.
 type DrillExecutionSummary struct {
-	DrillID             string               `json:"drill_id"`
-	CapsuleID           string               `json:"capsule_id"`
-	ServiceName         string               `json:"service_name"`
-	Passed              bool                 `json:"passed"`
-	DurationMs          int64                `json:"duration_ms"`
-	Checks              []adapter.CheckItem  `json:"checks"`
-	MissingDependencies []string             `json:"missing_dependencies"`
-	ErrorMessage        string               `json:"error_message,omitempty"`
+	DrillID             string                 `json:"drill_id"`
+	CapsuleID           string                 `json:"capsule_id"`
+	ServiceName         string                 `json:"service_name"`
+	Passed              bool                   `json:"passed"`
+	DurationMs          int64                  `json:"duration_ms"`
+	Checks              []adapter.CheckItem    `json:"checks"`
+	MissingDependencies []string               `json:"missing_dependencies"`
+	ErrorMessage        string                 `json:"error_message,omitempty"`
 	Details             map[string]interface{} `json:"details,omitempty"`
-	StartedAt           time.Time            `json:"started_at"`
-	CompletedAt         time.Time            `json:"completed_at"`
+	StartedAt           time.Time              `json:"started_at"`
+	CompletedAt         time.Time              `json:"completed_at"`
 }
 
 // Execute runs an isolated, ephemeral restore verification drill.
@@ -111,7 +111,11 @@ func (r *Runner) Execute(ctx context.Context, params DrillParams) (*DrillExecuti
 	if err != nil {
 		return nil, fmt.Errorf("failed creating ephemeral drill sandbox: %w", err)
 	}
-	defer secureScrubDir(scratchDir)
+	defer func() {
+		if err := secureScrubDir(scratchDir); err != nil {
+			audit.Log().Error("drill_sandbox_scrub", params.Actor, params.CapsuleID, "failed scrubbing drill sandbox", err)
+		}
+	}()
 
 	// 4. Decrypt and extract capsule into ephemeral sandbox (Streaming O(1) RAM)
 	if params.CapsulePath != "" {
@@ -190,16 +194,54 @@ func (r *Runner) Execute(ctx context.Context, params DrillParams) (*DrillExecuti
 	}, nil
 }
 
-// secureScrubDir zeroes file contents before deletion to prevent residual secret leakage on disk.
-func secureScrubDir(dir string) {
+// scrubChunk is the fixed buffer reused to overwrite restored files, so cleaning a
+// large capsule costs the same memory as cleaning a small one.
+const scrubChunk = 64 << 10
+
+// secureScrubDir overwrites restored file contents before deletion so a decrypted
+// copy of a service's secrets does not linger in the sandbox.
+//
+// Overwriting in place is best-effort: on SSDs, copy-on-write filesystems (btrfs,
+// ZFS), overlayfs and virtualised storage the original blocks may survive. Treat
+// it as reducing exposure, not as guaranteed erasure — the deletion below is what
+// the drill actually relies on.
+func secureScrubDir(dir string) error {
+	var firstErr error
+	zeros := make([]byte, scrubChunk)
+
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			if info.Size() > 0 {
-				zeros := make([]byte, info.Size())
-				_ = os.WriteFile(path, zeros, 0600)
-			}
+		if err != nil || info.IsDir() || info.Size() == 0 {
+			return nil
+		}
+		if err := overwriteFile(path, info.Size(), zeros); err != nil && firstErr == nil {
+			firstErr = err
 		}
 		return nil
 	})
-	_ = os.RemoveAll(dir)
+
+	if err := os.RemoveAll(dir); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// overwriteFile writes zeros over size bytes of path in fixed-size chunks.
+func overwriteFile(path string, size int64, zeros []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for remaining := size; remaining > 0; {
+		n := int64(len(zeros))
+		if remaining < n {
+			n = remaining
+		}
+		if _, err := f.Write(zeros[:n]); err != nil {
+			return err
+		}
+		remaining -= n
+	}
+	return f.Sync()
 }

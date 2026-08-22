@@ -40,7 +40,7 @@ func TestSessionManagement(t *testing.T) {
 		Role:    "admin",
 	}
 
-	cookie, err := mgr.CreateSession(ctx, user)
+	cookie, err := mgr.CreateSession(ctx, user, true)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}

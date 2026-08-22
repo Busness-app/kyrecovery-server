@@ -41,9 +41,10 @@ func (l *rateLimiter) exceeded(key string, limit int, now time.Time) bool {
 	return ok && !now.After(c.resetAt) && c.n >= limit
 }
 
-// recordFailure charges one failed attempt to key. Successful pairings are never charged,
-// so a host that legitimately pairs many services cannot lock itself out.
-func (l *rateLimiter) recordFailure(key string, now time.Time) {
+// record charges one attempt to key. Pairing and sign-in charge only failures, so a
+// host that legitimately pairs many services cannot lock itself out; backup pushes
+// charge every attempt because the cost there is storage, not guessing.
+func (l *rateLimiter) record(key string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

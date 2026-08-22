@@ -44,11 +44,11 @@ func TestAuditLedgerChainingAndVerification(t *testing.T) {
 	}
 
 	// Verify chain integrity
-	valid, count, lastHash, err := ledger.VerifyChain(ctx)
-	if err != nil || !valid {
-		t.Fatalf("VerifyChain failed: valid=%v, err=%v", valid, err)
+	status, err := ledger.VerifyChain(ctx)
+	if err != nil || !status.Valid {
+		t.Fatalf("VerifyChain failed: valid=%v, err=%v", status.Valid, err)
 	}
-	if count != 3 || lastHash != ev3.EventHash {
-		t.Fatalf("verification count or lastHash mismatch: count=%d, lastHash=%s", count, lastHash)
+	if status.Count != 3 || status.LastHash != ev3.EventHash {
+		t.Fatalf("verification count or lastHash mismatch: count=%d, lastHash=%s", status.Count, status.LastHash)
 	}
 }

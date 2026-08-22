@@ -144,11 +144,23 @@ sequenceDiagram
   ```
 `files` also accepts the compact form `{"data/notes.db": "<base64>"}`, and `dependencies` also accepts an explicit `[{name, type, required, description}]` array. Per-file `mode` is accepted but not applied: restored files are written `0600` inside the `0700` drill sandbox.
 
+- **Limits**:
+  - `service_name` must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` — it becomes part of the capsule filename.
+  - `total_shares` may not exceed 255, the ceiling of the GF(2^8) Shamir field.
+  - The request body is capped at 64 MiB by default (`KYRECOVERY_MAX_BACKUP_BYTES` on the server).
+  - At most 4096 files, 32 MiB decoded per file and 64 MiB decoded in total.
+  - At most 60 pushes per paired product per 15 minutes.
+- **Error Codes**:
+  - `400 Bad Request`: Malformed JSON, unsafe or invalid `service_name`, unsafe file path, or a limit above exceeded.
+  - `401 Unauthorized`: Missing, invalid, or revoked bearer token.
+  - `413 Payload Too Large`: Request body exceeded the server's push limit.
+  - `429 Too Many Requests`: Push rate limit exceeded for this paired product.
+
 - **Response** (`200 OK`):
   ```json
   {
     "status": "ingested",
-    "capsule_id": "cap-kynotes-1787019014",
+    "capsule_id": "cap-kynotes-1787019014-9f3c1d2ab4e50617",
     "service_name": "kynotes",
     "size_bytes": 1048576,
     "payload_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

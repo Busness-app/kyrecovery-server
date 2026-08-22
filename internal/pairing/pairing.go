@@ -157,23 +157,54 @@ type SelfDeclaredBackupPayload struct {
 	Files              BackupFiles                 `json:"files"` // relative path -> base64 encoded file data
 }
 
+// IngestLimits bounds what a single self-declared push may expand into. The
+// request body is already capped by the transport, but base64 decoding, packing
+// and the verification drill each hold a copy, so the decoded size is bounded
+// explicitly rather than inferred from the wire size.
+type IngestLimits struct {
+	MaxFiles      int
+	MaxFileBytes  int64
+	MaxTotalBytes int64
+}
+
+// DefaultIngestLimits are the limits used when a caller has no reason to differ.
+func DefaultIngestLimits() IngestLimits {
+	return IngestLimits{MaxFiles: 4096, MaxFileBytes: 32 << 20, MaxTotalBytes: 64 << 20}
+}
+
 // IngestSelfDeclaredBackup validates and decodes the files in a self-declared push.
-func IngestSelfDeclaredBackup(payload SelfDeclaredBackupPayload) (map[string][]byte, []capsule.Dependency, adapter.GenericRecipe, error) {
+func IngestSelfDeclaredBackup(payload SelfDeclaredBackupPayload, limits IngestLimits) (map[string][]byte, []capsule.Dependency, adapter.GenericRecipe, error) {
+	if limits.MaxFiles <= 0 || limits.MaxFileBytes <= 0 || limits.MaxTotalBytes <= 0 {
+		limits = DefaultIngestLimits()
+	}
 	if payload.ServiceName == "" {
 		return nil, nil, adapter.GenericRecipe{}, errors.New("service_name is required in self-declared backup")
 	}
 	if len(payload.Files) == 0 {
 		return nil, nil, adapter.GenericRecipe{}, errors.New("no files provided in self-declared backup payload")
 	}
+	if len(payload.Files) > limits.MaxFiles {
+		return nil, nil, adapter.GenericRecipe{}, fmt.Errorf("backup declares %d files, limit is %d", len(payload.Files), limits.MaxFiles)
+	}
 
-	rawFiles := make(map[string][]byte)
+	rawFiles := make(map[string][]byte, len(payload.Files))
+	var total int64
 	for relPath, b64Content := range payload.Files {
 		if err := safeRelPath(relPath); err != nil {
 			return nil, nil, adapter.GenericRecipe{}, err
 		}
+		// Check the encoded length first so an oversized file is rejected before
+		// it is materialised in memory.
+		if decodedLen := int64(len(b64Content)) / 4 * 3; decodedLen > limits.MaxFileBytes {
+			return nil, nil, adapter.GenericRecipe{}, fmt.Errorf("file %s exceeds the %d byte per-file limit", relPath, limits.MaxFileBytes)
+		}
 		data, err := base64.StdEncoding.DecodeString(b64Content)
 		if err != nil {
 			return nil, nil, adapter.GenericRecipe{}, fmt.Errorf("invalid base64 content for file %s: %w", relPath, err)
+		}
+		total += int64(len(data))
+		if total > limits.MaxTotalBytes {
+			return nil, nil, adapter.GenericRecipe{}, fmt.Errorf("backup payload exceeds the %d byte decoded limit", limits.MaxTotalBytes)
 		}
 		rawFiles[relPath] = data
 	}

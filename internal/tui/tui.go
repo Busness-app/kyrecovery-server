@@ -31,10 +31,10 @@ const (
 
 // Console runs the interactive terminal disaster recovery console.
 type Console struct {
-	dataDir  string
-	db       *db.DB
-	ledger   *audit.Ledger
-	reader   *bufio.Reader
+	dataDir string
+	db      *db.DB
+	ledger  *audit.Ledger
+	reader  *bufio.Reader
 }
 
 // NewConsole creates a new terminal console instance.
@@ -282,13 +282,13 @@ func (c *Console) handleAuditVerification(ctx context.Context) {
 	c.clearScreen()
 	fmt.Printf("%s=== [3] CRYPTOGRAPHIC AUDIT LEDGER CHAIN VERIFIER ===%s\n\n", colorBold, colorReset)
 
-	valid, count, lastHash, err := c.ledger.VerifyChain(ctx)
-	if err != nil || !valid {
+	status, err := c.ledger.VerifyChain(ctx)
+	if err != nil || !status.Valid {
 		fmt.Printf("%s✗ AUDIT CHAIN COMPROMISED OR BROKEN: %v%s\n", colorRed, err, colorReset)
 	} else {
 		fmt.Printf("%s✓ AUDIT CHAIN FULLY VERIFIED%s\n", colorGreen, colorReset)
-		fmt.Printf("  Verified Events: %s%d%s\n", colorBold, count, colorReset)
-		fmt.Printf("  Latest Hash:     %s%s%s\n", colorCyan, lastHash, colorReset)
+		fmt.Printf("  Verified Events: %s%d%s\n", colorBold, status.Count, colorReset)
+		fmt.Printf("  Latest Hash:     %s%s%s\n", colorCyan, status.LastHash, colorReset)
 	}
 
 	fmt.Println("\nRecent Audit Stream:")

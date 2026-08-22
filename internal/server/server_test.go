@@ -70,6 +70,7 @@ func TestServerEndpoints(t *testing.T) {
 
 	// 1. Test GET /api/readiness
 	req := httptest.NewRequest(http.MethodGet, "/api/readiness", nil)
+	req.AddCookie(sessionCookie)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

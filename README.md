@@ -1,7 +1,7 @@
 # KyRecovery
 
-KyRecovery is a planned self-hosted recovery and restore-verification service
-for KySecurity deployments.
+KyRecovery is a self-hosted recovery and restore-verification service for
+KySecurity deployments.
 
 Its purpose is to make recovery a tested capability instead of a collection of
 backups that may or may not work when an administrator needs them.
@@ -15,7 +15,8 @@ backups that may or may not work when an administrator needs them.
 - Runs scheduled restore drills in an isolated environment.
 - Reports missing files, expired credentials, failed dependencies, restore time,
   and the last successful verification.
-- Records tamper-evident, content-blind recovery events.
+- Records hash-chained, content-blind recovery events, authenticated with a
+  server key held outside the database.
 - Exports a human-readable recovery kit for emergency use.
 
 ## Example workflow
@@ -58,7 +59,35 @@ KySignOn or KyPassword, including:
 Cross-service orchestration, custodian rotation, remote drill environments, and
 automatic secret rotation are later work.
 
+## Security model
+
+- **Roles.** Every API route is authorized against `viewer` < `operator` <
+  `admin`. Viewers read; operators run captures, drills and ceremonies; admins
+  change pairing, replication targets and SSO. An unrecognised role claim from an
+  identity provider is treated as `viewer`.
+- **Server key.** `<data-dir>/secret.key` (0600, or `KYRECOVERY_SECRET_KEY`)
+  seals replication credentials and the SSO client secret, and keys the audit
+  ledger. Back it up with the database — without it those secrets are
+  unrecoverable. It defends against a stolen database, not against an attacker
+  who already has the data directory.
+- **Transport.** Session cookies are `HttpOnly`, and `Secure` when the login
+  arrived over TLS (directly or via `X-Forwarded-Proto`). Run KyRecovery behind
+  TLS and set `--cookie-secure=true` to make that unconditional.
+- **Limits.** API bodies are capped at 1 MiB; self-declared backup pushes at
+  `KYRECOVERY_MAX_BACKUP_BYTES` (64 MiB by default), 4096 files, and 60 pushes
+  per 15 minutes per paired product. KyRecovery does not yet reserve or enforce
+  free disk space for the capsule volume — size that volume for your retention.
+- **Drill cleanup.** Restored files are overwritten before deletion. On SSDs,
+  copy-on-write filesystems and virtualised storage that reduces exposure but
+  cannot guarantee the original blocks are gone.
+- **SSO.** The issuer must publish `/.well-known/openid-configuration`; endpoints
+  and signing keys come from discovery, not from hardcoded paths.
+
 ## Repository status
 
-KyRecovery is currently a product definition only. Implementation has not
-started.
+The server is implemented and tested: capsule capture, zero-code pairing and
+self-declaring ingest, custodian quorum ceremonies, restore drills, offsite
+replication, the audit ledger, recovery kit export, and the air-gapped TUI. The
+later work listed under Initial scope is still outstanding.
+
+Verify with `go test ./...`.

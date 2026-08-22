@@ -71,7 +71,7 @@ func TestPairingAndSelfDeclaredIngest(t *testing.T) {
 		},
 	}
 
-	files, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload)
+	files, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload, pairing.DefaultIngestLimits())
 	if err != nil {
 		t.Fatalf("IngestSelfDeclaredBackup failed: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestSelfDeclaredPayloadAcceptsPublishedWireFormat(t *testing.T) {
 		t.Fatalf("decoding published wire format failed: %v", err)
 	}
 
-	files, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload)
+	files, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload, pairing.DefaultIngestLimits())
 	if err != nil {
 		t.Fatalf("IngestSelfDeclaredBackup failed: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestSelfDeclaredIngestRejectsPathTraversal(t *testing.T) {
 			ServiceName: "kynotes",
 			Files:       pairing.BackupFiles{bad: base64.StdEncoding.EncodeToString([]byte("x"))},
 		}
-		if _, _, _, err := pairing.IngestSelfDeclaredBackup(payload); err == nil {
+		if _, _, _, err := pairing.IngestSelfDeclaredBackup(payload, pairing.DefaultIngestLimits()); err == nil {
 			t.Fatalf("expected rejection of unsafe path %q", bad)
 		}
 	}

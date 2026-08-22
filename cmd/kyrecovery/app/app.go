@@ -93,7 +93,22 @@ func cmdServe(args []string) {
 	ssoClientSecret := fs.String("sso-client-secret", os.Getenv("KY_SSO_CLIENT_SECRET"), "KySignOn OAuth Client Secret")
 	ssoRedirectURL := fs.String("sso-redirect-url", os.Getenv("KY_SSO_REDIRECT_URL"), "KySignOn OAuth Callback Redirect URL")
 	ssoAdminEmail := fs.String("sso-admin-email", os.Getenv("KY_ADMIN_EMAIL"), "Admin user email address")
+	cookieSecure := fs.String("cookie-secure", os.Getenv("KYRECOVERY_COOKIE_SECURE"), "Force the Secure flag on session cookies: true, false, or empty to follow the request transport")
 	fs.Parse(args)
+
+	var cookieSecureFlag *bool
+	switch strings.ToLower(strings.TrimSpace(*cookieSecure)) {
+	case "true", "1", "yes":
+		v := true
+		cookieSecureFlag = &v
+	case "false", "0", "no":
+		v := false
+		cookieSecureFlag = &v
+	case "":
+	default:
+		fmt.Fprintf(os.Stderr, "Invalid --cookie-secure value %q (expected true, false or empty)\n", *cookieSecure)
+		os.Exit(1)
+	}
 
 	if err := os.MkdirAll(*dataDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create data directory: %v\n", err)
@@ -142,6 +157,7 @@ func cmdServe(args []string) {
 		DataDir:      *dataDir,
 		DatabasePath: dbPath,
 		Auth:         authCfg,
+		CookieSecure: cookieSecureFlag,
 	}, database, ledger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Server initialization error: %v\n", err)
@@ -152,6 +168,10 @@ func cmdServe(args []string) {
 	defer cancel()
 
 	fmt.Printf("⚡ KyRecovery Server listening on http://0.0.0.0:%d (data: %s)\n", *port, *dataDir)
+	if cookieSecureFlag == nil {
+		fmt.Println("   Serving plain HTTP: sessions started over HTTP get cookies without the Secure flag.")
+		fmt.Println("   Terminate TLS in front of KyRecovery (or set --cookie-secure=true) for production use.")
+	}
 	if err := srv.Start(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
@@ -484,14 +504,14 @@ func cmdAudit(args []string) {
 	defer database.Close()
 
 	ledger := audit.NewLedger(database)
-	valid, count, lastHash, err := ledger.VerifyChain(context.Background())
-	if err != nil || !valid {
+	status, err := ledger.VerifyChain(context.Background())
+	if err != nil || !status.Valid {
 		fmt.Printf("✗ Audit Chain Broken: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ Cryptographic Audit Chain Valid (%d events verified)\n", count)
-	fmt.Printf("  Latest Hash: %s\n", lastHash)
+	fmt.Printf("✓ Cryptographic Audit Chain Valid (%d events verified)\n", status.Count)
+	fmt.Printf("  Latest Hash: %s\n", status.LastHash)
 }
 
 // 9. Pair

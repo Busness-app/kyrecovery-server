@@ -37,6 +37,10 @@ type Config struct {
 	DataDir      string
 	DatabasePath string
 	Auth         auth.OIDCConfig
+
+	// CookieSecure forces the Secure attribute on session cookies. When nil the
+	// server follows the transport the request actually arrived on.
+	CookieSecure *bool
 }
 
 // Server provides the HTTP router, REST API, and static assets for KyRecovery.
@@ -51,6 +55,8 @@ type Server struct {
 	inspector   *diff.Inspector
 	adapters    map[string]adapter.ServiceAdapter
 	claimLimit  *rateLimiter
+	loginLimit  *rateLimiter
+	pushLimit   *rateLimiter
 	mux         *http.ServeMux
 }
 
@@ -95,6 +101,8 @@ func New(cfg Config, database *db.DB, ledger *audit.Ledger) (*Server, error) {
 		inspector:   inspector,
 		adapters:    adapters,
 		claimLimit:  newRateLimiter(claimWindow),
+		loginLimit:  newRateLimiter(loginWindow),
+		pushLimit:   newRateLimiter(pushWindow),
 		mux:         http.NewServeMux(),
 	}
 
@@ -186,26 +194,76 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/capsules/timeline", s.handleCapsuleTimeline)
 }
 
-func isPublicPath(p string) bool {
-	switch p {
-	case "/favicon.svg",
-		"/favicon.ico",
-		"/api/auth/config",
-		"/api/auth/me",
-		"/api/auth/login",
-		"/api/auth/login/local",
-		"/api/auth/callback",
-		"/api/auth/logout",
-		"/api/auth/sso/config",
-		"/api/auth/sso/test",
-		"/api/readiness",
-		"/api/pairing/claim",
-		"/api/backup/push",
-		"/api/v1/backup/push":
-		return true
-	default:
-		return false
+// rolePublic marks a route reachable without a session: it is needed to sign in,
+// or it carries its own credential (a pairing code or a product API token).
+const rolePublic = ""
+
+// apiPolicy is the authorization table for the REST API, keyed by "<METHOD> <path>"
+// with "*" matching any method. Everything not listed defaults to admin, so a new
+// route is closed until it is deliberately opened here.
+var apiPolicy = map[string]string{
+	"* /api/auth/config":       rolePublic,
+	"* /api/auth/me":           rolePublic,
+	"* /api/auth/login":        rolePublic,
+	"* /api/auth/login/local":  rolePublic,
+	"* /api/auth/callback":     rolePublic,
+	"* /api/auth/logout":       rolePublic,
+	"GET /api/auth/sso/config": rolePublic, // the sign-in page must know whether SSO is offered
+	"* /api/pairing/claim":     rolePublic, // one-time pairing code
+	"* /api/backup/push":       rolePublic, // product API token
+	"* /api/v1/backup/push":    rolePublic, // product API token
+
+	"* /api/auth/password":         auth.RoleViewer,
+	"GET /api/readiness":           auth.RoleViewer,
+	"GET /api/capsules":            auth.RoleViewer,
+	"GET /api/capsules/diff":       auth.RoleViewer,
+	"GET /api/capsules/timeline":   auth.RoleViewer,
+	"GET /api/custodians":          auth.RoleViewer,
+	"GET /api/drills":              auth.RoleViewer,
+	"GET /api/audit":               auth.RoleViewer,
+	"GET /api/pairing/list":        auth.RoleViewer,
+	"GET /api/ceremonies":          auth.RoleViewer,
+	"GET /api/replication/targets": auth.RoleViewer,
+	"GET /api/replication/logs":    auth.RoleViewer,
+
+	"POST /api/capsules/capture":   auth.RoleOperator,
+	"POST /api/custodians":         auth.RoleOperator,
+	"POST /api/drills/run":         auth.RoleOperator,
+	"POST /api/audit/verify":       auth.RoleOperator,
+	"POST /api/ceremonies/create":  auth.RoleOperator,
+	"POST /api/ceremonies/submit":  auth.RoleOperator,
+	"POST /api/ceremonies/execute": auth.RoleOperator,
+	"POST /api/ceremonies/cancel":  auth.RoleOperator,
+	"POST /api/replication/sync":   auth.RoleOperator,
+
+	"POST /api/auth/sso/config":          auth.RoleAdmin,
+	"POST /api/auth/sso/test":            auth.RoleAdmin,
+	"POST /api/pairing/generate":         auth.RoleAdmin,
+	"POST /api/pairing/revoke":           auth.RoleAdmin,
+	"POST /api/replication/targets":      auth.RoleAdmin,
+	"POST /api/replication/targets/test": auth.RoleAdmin,
+}
+
+// requiredRole returns the minimum role needed for an API request.
+func requiredRole(method, path string) string {
+	if role, ok := apiPolicy[method+" "+path]; ok {
+		return role
 	}
+	if role, ok := apiPolicy["* "+path]; ok {
+		return role
+	}
+
+	// Capsule sub-resources: reading metadata is a viewer action, taking the
+	// ciphertext or the runbook off the server is not.
+	if strings.HasPrefix(path, "/api/capsules/") && method == http.MethodGet {
+		switch {
+		case strings.HasSuffix(path, "/download"), strings.HasSuffix(path, "/export-kit"):
+			return auth.RoleOperator
+		default:
+			return auth.RoleViewer
+		}
+	}
+	return auth.RoleAdmin
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -213,22 +271,44 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	if r.TLS != nil {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	}
 
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r.URL.Path))
 
-		// Authentication enforcement for protected API routes
-		if !isPublicPath(r.URL.Path) {
+		if required := requiredRole(r.Method, r.URL.Path); required != rolePublic {
 			session, err := s.authMgr.GetSession(r.Context(), r)
 			if err != nil || session == nil {
 				writeError(w, http.StatusUnauthorized, "Unauthorized: Authentication required")
+				return
+			}
+			if auth.RoleRank(session.Role) < auth.RoleRank(required) {
+				writeError(w, http.StatusForbidden, fmt.Sprintf("Forbidden: %s role required", required))
 				return
 			}
 		}
 	}
 
 	s.mux.ServeHTTP(w, r)
+}
+
+// cookieSecure decides whether a session cookie may only travel over HTTPS.
+// KYRECOVERY_COOKIE_SECURE pins the answer for deployments that terminate TLS
+// somewhere KyRecovery cannot observe; otherwise the cookie is marked Secure
+// whenever the login itself arrived over TLS, so a session established over
+// HTTPS can never leak back out over plaintext HTTP.
+func (s *Server) cookieSecure(r *http.Request) bool {
+	if s.cfg.CookieSecure != nil {
+		return *s.cfg.CookieSecure
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -304,6 +384,10 @@ func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
 	if req.TotalShares < req.Threshold {
 		req.TotalShares = req.Threshold + 1
 	}
+	if req.TotalShares > maxSharesPerCapsule {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("total_shares cannot exceed %d", maxSharesPerCapsule))
+		return
+	}
 
 	adp, exists := s.adapters[req.ServiceName]
 	if !exists {
@@ -318,7 +402,11 @@ func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	capsuleID := fmt.Sprintf("cap-%s-%d", req.ServiceName, time.Now().Unix())
+	capsuleID, err := newCapsuleID(req.ServiceName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	packResult, err := capsule.Pack(capsule.PackOptions{
 		CapsuleID:    capsuleID,
 		ServiceName:  req.ServiceName,
@@ -332,18 +420,10 @@ func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write encrypted capsule file to disk
-	capsuleFilePath := filepath.Join(s.cfg.DataDir, "capsules", fmt.Sprintf("%s.kycap", capsuleID))
-	if err := os.WriteFile(capsuleFilePath, packResult.CapsuleBytes, 0600); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to write capsule file: %v", err))
-		return
-	}
-
-	// Insert into DB
 	capRec := db.CapsuleRecord{
 		ID:          capsuleID,
 		ServiceName: req.ServiceName,
-		FilePath:    capsuleFilePath,
+		FilePath:    s.capsulePath(capsuleID),
 		SizeBytes:   int64(len(packResult.CapsuleBytes)),
 		PayloadHash: packResult.Manifest.PayloadHash,
 		Threshold:   req.Threshold,
@@ -351,8 +431,8 @@ func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
 		Status:      "active",
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := s.db.InsertCapsule(ctx, capRec); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed recording capsule: %v", err))
+	if err := s.publishCapsule(ctx, capRec, packResult.CapsuleBytes); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -610,11 +690,11 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	valid, count, lastHash, err := s.ledger.VerifyChain(r.Context())
+	status, err := s.ledger.VerifyChain(r.Context())
 	resp := map[string]interface{}{
-		"valid":     valid,
-		"count":     count,
-		"last_hash": lastHash,
+		"valid":     status.Valid,
+		"count":     status.Count,
+		"last_hash": status.LastHash,
 	}
 	if err != nil {
 		resp["error"] = err.Error()
@@ -715,7 +795,7 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 
 	var req pairingClaimRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PairingCode == "" {
-		s.claimLimit.recordFailure(ipKey, now)
+		s.claimLimit.record(ipKey, now)
 		writeError(w, http.StatusBadRequest, "PairingCode is required")
 		return
 	}
@@ -733,8 +813,8 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 
 	app, err := s.db.ClaimPairingCode(r.Context(), req.PairingCode, req.ServiceName, req.AppName)
 	if err != nil {
-		s.claimLimit.recordFailure(ipKey, now)
-		s.claimLimit.recordFailure(codeKey, now)
+		s.claimLimit.record(ipKey, now)
+		s.claimLimit.record(codeKey, now)
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "already consumed") {
 			status = http.StatusConflict
@@ -780,6 +860,15 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One compromised product token must not be able to fill the capsule volume.
+	now := time.Now()
+	pushKey := "push:" + app.ID
+	if s.pushLimit.exceeded(pushKey, pushesPerToken, now) {
+		writeError(w, http.StatusTooManyRequests, "Backup push rate limit exceeded for this paired product")
+		return
+	}
+	s.pushLimit.record(pushKey, now)
+
 	var payload pairing.SelfDeclaredBackupPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid JSON backup payload: %v", err))
@@ -795,8 +884,23 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 	if payload.TotalShares < payload.Threshold {
 		payload.TotalShares = payload.Threshold + 1
 	}
+	if payload.TotalShares > maxSharesPerCapsule {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("total_shares cannot exceed %d", maxSharesPerCapsule))
+		return
+	}
+	if !validServiceName(payload.ServiceName) {
+		writeError(w, http.StatusBadRequest, "service_name must be 1-64 characters of [A-Za-z0-9._-]")
+		return
+	}
 
-	rawFiles, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload)
+	pushLimit := maxBackupPushBytes()
+	ingestLimits := pairing.DefaultIngestLimits()
+	if pushLimit > ingestLimits.MaxTotalBytes {
+		ingestLimits.MaxTotalBytes = pushLimit
+		ingestLimits.MaxFileBytes = pushLimit
+	}
+
+	rawFiles, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload, ingestLimits)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed processing backup payload: %v", err))
 		return
@@ -806,7 +910,11 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 	recipeBytes, _ := json.MarshalIndent(recipe, "", "  ")
 	rawFiles["kyrecovery-recipe.json"] = recipeBytes
 
-	capsuleID := fmt.Sprintf("cap-%s-%d", payload.ServiceName, time.Now().Unix())
+	capsuleID, err := newCapsuleID(payload.ServiceName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	packResult, err := capsule.Pack(capsule.PackOptions{
 		CapsuleID:    capsuleID,
 		ServiceName:  payload.ServiceName,
@@ -820,18 +928,10 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write encrypted capsule file to disk
-	capsuleFilePath := filepath.Join(s.cfg.DataDir, "capsules", fmt.Sprintf("%s.kycap", capsuleID))
-	if err := os.WriteFile(capsuleFilePath, packResult.CapsuleBytes, 0600); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed writing capsule: %v", err))
-		return
-	}
-
-	// Save to DB
 	capRec := db.CapsuleRecord{
 		ID:          capsuleID,
 		ServiceName: payload.ServiceName,
-		FilePath:    capsuleFilePath,
+		FilePath:    s.capsulePath(capsuleID),
 		SizeBytes:   int64(len(packResult.CapsuleBytes)),
 		PayloadHash: packResult.Manifest.PayloadHash,
 		Threshold:   payload.Threshold,
@@ -839,8 +939,8 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 		Status:      "active",
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := s.db.InsertCapsule(ctx, capRec); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed recording capsule: %v", err))
+	if err := s.publishCapsule(ctx, capRec, packResult.CapsuleBytes); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -896,11 +996,9 @@ func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.authMgr.GetConfig()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sso_enabled":  s.authMgr.IsEnabled(),
-		"issuer_url":   cfg.IssuerURL,
-		"client_id":    cfg.ClientID,
-		"redirect_url": cfg.RedirectURL,
-		"admin_email":  cfg.AdminEmail,
+		"sso_enabled": s.authMgr.IsEnabled(),
+		"issuer_url":  cfg.IssuerURL,
+		"client_id":   cfg.ClientID,
 	})
 }
 
@@ -925,6 +1023,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/callback",
 		Expires:  time.Now().Add(10 * time.Minute),
 		HttpOnly: true,
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.SetCookie(w, &http.Cookie{
@@ -933,10 +1032,26 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/callback",
 		Expires:  time.Now().Add(10 * time.Minute),
 		HttpOnly: true,
+		Secure:   s.cookieSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+	// The nonce is bound to this browser so the ID token returned at the callback
+	// can be proven to belong to this login attempt.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "kyrec_nonce",
+		Value:    nonce,
+		Path:     "/api/auth/callback",
+		Expires:  time.Now().Add(10 * time.Minute),
+		HttpOnly: true,
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	authURL := s.authMgr.BuildAuthURL(state, nonce, challenge)
+	authURL, err := s.authMgr.BuildAuthURL(r.Context(), state, nonce, challenge)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("KySignOn discovery failed: %v", err))
+		return
+	}
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -958,13 +1073,26 @@ func (s *Server) handleAuthLoginLocal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Argon2id makes each guess expensive for the server as well as the attacker,
+	// so unauthenticated login attempts are capped per source address and per account.
+	now := time.Now()
+	ipKey := "login-ip:" + clientIP(r)
+	accKey := "login-user:" + strings.ToLower(strings.TrimSpace(req.Username))
+	if s.loginLimit.exceeded(ipKey, loginAttemptsPerIP, now) || s.loginLimit.exceeded(accKey, loginAttemptsPerAcc, now) {
+		writeError(w, http.StatusTooManyRequests, "Too many failed sign-in attempts; try again later")
+		return
+	}
+
 	userInfo, err := s.authMgr.AuthenticateLocal(r.Context(), req.Username, req.Password)
 	if err != nil {
+		s.loginLimit.record(ipKey, now)
+		s.loginLimit.record(accKey, now)
+		_, _ = s.ledger.Record(r.Context(), "user_login_failed", req.Username, clientIP(r), nil)
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
-	sessionCookie, err := s.authMgr.CreateSession(r.Context(), userInfo)
+	sessionCookie, err := s.authMgr.CreateSession(r.Context(), userInfo, s.cookieSecure(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed creating session")
 		return
@@ -977,10 +1105,11 @@ func (s *Server) handleAuthLoginLocal(w http.ResponseWriter, r *http.Request) {
 		"role":     userInfo.Role,
 	})
 
+	// The session lives in an HttpOnly cookie only; echoing it into the response
+	// body would hand it to any script that can read a fetch result.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "authenticated",
-		"session_token": sessionCookie.Value,
-		"user":          userInfo,
+		"status": "authenticated",
+		"user":   userInfo,
 	})
 }
 
@@ -1042,18 +1171,23 @@ func (s *Server) handleSSOConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		cfg := s.authMgr.GetConfig()
-		clientSecretMasked := ""
-		if cfg.ClientSecret != "" {
-			clientSecretMasked = "••••••••"
+		resp := map[string]interface{}{
+			"enabled":    cfg.Enabled,
+			"issuer_url": cfg.IssuerURL,
+			"client_id":  cfg.ClientID,
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"enabled":       cfg.Enabled,
-			"issuer_url":    cfg.IssuerURL,
-			"client_id":     cfg.ClientID,
-			"client_secret": clientSecretMasked,
-			"redirect_url":  cfg.RedirectURL,
-			"admin_email":   cfg.AdminEmail,
-		})
+		// This route is reachable from the sign-in page, so the rest of the
+		// configuration is only filled in for an administrator.
+		if session, _ := s.authMgr.GetSession(ctx, r); session != nil && session.Role == auth.RoleAdmin {
+			clientSecretMasked := ""
+			if cfg.ClientSecret != "" {
+				clientSecretMasked = "••••••••"
+			}
+			resp["client_secret"] = clientSecretMasked
+			resp["redirect_url"] = cfg.RedirectURL
+			resp["admin_email"] = cfg.AdminEmail
+		}
+		writeJSON(w, http.StatusOK, resp)
 
 	case http.MethodPost:
 		session, err := s.authMgr.GetSession(ctx, r)
@@ -1142,13 +1276,19 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userInfo, err := s.authMgr.ExchangeCode(r.Context(), code, pkceCookie.Value)
+	nonceCookie, err := r.Cookie("kyrec_nonce")
+	if err != nil || nonceCookie.Value == "" {
+		writeError(w, http.StatusBadRequest, "Missing OIDC nonce cookie")
+		return
+	}
+
+	userInfo, err := s.authMgr.ExchangeCode(r.Context(), code, pkceCookie.Value, nonceCookie.Value)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
 
-	sessionCookie, err := s.authMgr.CreateSession(r.Context(), userInfo)
+	sessionCookie, err := s.authMgr.CreateSession(r.Context(), userInfo, s.cookieSecure(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed creating session")
 		return
@@ -1159,6 +1299,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// Clean up temporary auth cookies
 	http.SetCookie(w, &http.Cookie{Name: "kyrec_pkce", Value: "", Path: "/api/auth/callback", MaxAge: -1})
 	http.SetCookie(w, &http.Cookie{Name: "kyrec_state", Value: "", Path: "/api/auth/callback", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "kyrec_nonce", Value: "", Path: "/api/auth/callback", MaxAge: -1})
 
 	_, _ = s.ledger.Record(r.Context(), "user_logged_in_sso", userInfo.Email, userInfo.Subject, map[string]interface{}{
 		"name": userInfo.Name,
@@ -1598,8 +1739,15 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		s.Close()
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errChan:
+		s.Close()
 		return err
 	}
+}
+
+// Close releases background workers owned by the server. It is safe to call twice.
+func (s *Server) Close() {
+	s.ceremonies.Close()
 }

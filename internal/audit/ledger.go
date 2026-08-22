@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"kyrecovery-server/internal/db"
+	"kyrecovery-server/internal/secrets"
 )
 
 const GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -25,6 +27,9 @@ type Logger struct {
 var (
 	defaultLogger = NewLogger()
 )
+
+// Log returns the shared structured logger.
+func Log() *Logger { return defaultLogger }
 
 // LogEntry is the schema for structured log emissions.
 type LogEntry struct {
@@ -80,27 +85,120 @@ func (l *Logger) Error(action, actor, targetID, message string, err error) {
 }
 
 // Ledger manages the append-only hash-chained audit trail.
+//
+// Events are chained with HMAC-SHA256 under a key held outside SQLite (see
+// internal/secrets), so an attacker who can write to the database cannot edit an
+// event and recompute the chain. That covers a stolen or replicated database
+// file, and SQL-level access. It does not cover an attacker who holds the server
+// key or the data directory — they can forge the chain, or remove the migration
+// marker and have a forged chain re-keyed on restart. For a guarantee that
+// survives full host compromise, anchor the chain head somewhere KyRecovery
+// cannot write.
 type Ledger struct {
-	mu sync.Mutex
-	db *db.DB
+	mu   sync.Mutex
+	db   *db.DB
+	key  []byte
+	keys *secrets.Keyring
 }
 
-// NewLedger initializes an audit ledger.
+// NewLedger initializes an audit ledger keyed by the database's server keyring.
+// On the first open after an upgrade it re-authenticates any pre-existing chain
+// under the ledger key; afterwards unkeyed event hashes are always rejected.
 func NewLedger(database *db.DB) *Ledger {
-	return &Ledger{
-		db: database,
+	l := &Ledger{db: database}
+	if database == nil {
+		return l
 	}
+	l.keys = database.Keyring()
+	l.key = l.keys.LedgerKey()
+	if err := l.rekeyLegacyChain(context.Background()); err != nil {
+		defaultLogger.Error("ledger_rekey", "system", "audit_events", "failed re-keying the existing audit chain", err)
+	}
+	return l
 }
 
-// CalculateEventHash computes the cryptographic SHA256 of the event tuple.
+// rekeyLegacyChain rewrites the chain linkage of events written before the
+// ledger was keyed. The chain must verify under the unkeyed algorithm first, so
+// a chain that was already broken is never blessed. This runs once: the outcome
+// is recorded outside SQLite, beyond the reach of a database-only attacker.
+func (l *Ledger) rekeyLegacyChain(ctx context.Context) error {
+	if l.keys == nil || l.keys.LedgerKeyed() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	events, err := l.db.ListAuditEvents(ctx, 100000)
+	if err != nil {
+		return err
+	}
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
+
+	// Pass one: the stored chain must be self-consistent under the unkeyed
+	// algorithm (or already keyed) before anything is rewritten.
+	prevStored := GenesisHash
+	rekeyed := 0
+	for _, ev := range events {
+		if ev.PrevHash != prevStored {
+			return fmt.Errorf("audit chain is broken at sequence %d; refusing to re-key it", ev.SequenceNum)
+		}
+		legacy := CalculateEventHash(ev.SequenceNum, ev.PrevHash, ev.Action, ev.Actor, ev.TargetID, ev.DetailsJSON, ev.CreatedAt)
+		keyed := l.eventHash(ev.SequenceNum, ev.PrevHash, ev.Action, ev.Actor, ev.TargetID, ev.DetailsJSON, ev.CreatedAt)
+		switch ev.EventHash {
+		case keyed:
+		case legacy:
+			rekeyed++
+		default:
+			return fmt.Errorf("audit event %d does not match its recorded hash; refusing to re-key it", ev.SequenceNum)
+		}
+		prevStored = ev.EventHash
+	}
+
+	// Pass two: relink the whole chain under the ledger key.
+	prev := GenesisHash
+	for _, ev := range events {
+		h := l.eventHash(ev.SequenceNum, prev, ev.Action, ev.Actor, ev.TargetID, ev.DetailsJSON, ev.CreatedAt)
+		if err := l.db.UpdateAuditEventHashes(ctx, ev.SequenceNum, prev, h); err != nil {
+			return err
+		}
+		prev = h
+	}
+
+	if rekeyed > 0 {
+		defaultLogger.Info("ledger_rekey", "system", "audit_events", "REKEYED",
+			fmt.Sprintf("%d pre-existing audit events are now authenticated with the server ledger key", rekeyed))
+	}
+	return l.keys.MarkLedgerKeyed()
+}
+
+// CalculateEventHash computes the unkeyed SHA256 of the event tuple.
+//
+// Deprecated: retained to verify chains written before the ledger was keyed.
+// New events use Ledger.eventHash.
 func CalculateEventHash(seq int64, prevHash, action, actor, targetID, detailsJSON string, createdAt time.Time) string {
+	h := sha256.New()
+	h.Write(eventTuple(seq, prevHash, action, actor, targetID, detailsJSON, createdAt))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func eventTuple(seq int64, prevHash, action, actor, targetID, detailsJSON string, createdAt time.Time) []byte {
 	detailsHash := sha256.Sum256([]byte(detailsJSON))
 	detailsHex := hex.EncodeToString(detailsHash[:])
 
 	timeStr := createdAt.UTC().Format(time.RFC3339Nano)
-	raw := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s", seq, prevHash, action, actor, targetID, detailsHex, timeStr)
-	h := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(h[:])
+	return []byte(fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s", seq, prevHash, action, actor, targetID, detailsHex, timeStr))
+}
+
+// eventHash authenticates an event under the server ledger key.
+func (l *Ledger) eventHash(seq int64, prevHash, action, actor, targetID, detailsJSON string, createdAt time.Time) string {
+	if len(l.key) == 0 {
+		return CalculateEventHash(seq, prevHash, action, actor, targetID, detailsJSON, createdAt)
+	}
+	mac := hmac.New(sha256.New, l.key)
+	mac.Write(eventTuple(seq, prevHash, action, actor, targetID, detailsJSON, createdAt))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // Record appends a new verified event to the tamper-evident chain and emits structured log.
@@ -127,7 +225,7 @@ func (l *Ledger) Record(ctx context.Context, action, actor, targetID string, det
 	detailsJSON := string(detailsBytes)
 
 	now := time.Now().UTC()
-	eventHash := CalculateEventHash(seq, prevHash, action, actor, targetID, detailsJSON, now)
+	eventHash := l.eventHash(seq, prevHash, action, actor, targetID, detailsJSON, now)
 
 	record := db.AuditRecord{
 		SequenceNum: seq,
@@ -149,17 +247,24 @@ func (l *Ledger) Record(ctx context.Context, action, actor, targetID string, det
 	return &record, nil
 }
 
+// ChainStatus reports the outcome of an audit chain verification.
+type ChainStatus struct {
+	Valid    bool   `json:"valid"`
+	Count    int64  `json:"count"`
+	LastHash string `json:"last_hash"`
+}
+
 // VerifyChain verifies the integrity of the audit chain from sequence 1 to the end.
-func (l *Ledger) VerifyChain(ctx context.Context) (bool, int64, string, error) {
+func (l *Ledger) VerifyChain(ctx context.Context) (ChainStatus, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	events, err := l.db.ListAuditEvents(ctx, 100000)
 	if err != nil {
-		return false, 0, "", err
+		return ChainStatus{}, err
 	}
 	if len(events) == 0 {
-		return true, 0, GenesisHash, nil
+		return ChainStatus{Valid: true, LastHash: GenesisHash}, nil
 	}
 
 	// ListAuditEvents returns descending, reverse to ascending for chain verification
@@ -167,23 +272,30 @@ func (l *Ledger) VerifyChain(ctx context.Context) (bool, int64, string, error) {
 		events[i], events[j] = events[j], events[i]
 	}
 
+	status := ChainStatus{}
 	expectedPrev := GenesisHash
 	for i, ev := range events {
+		status.Count = ev.SequenceNum
+		status.LastHash = ev.EventHash
+
 		expectedSeq := int64(i + 1)
 		if ev.SequenceNum != expectedSeq {
-			return false, ev.SequenceNum, ev.EventHash, fmt.Errorf("sequence gap at index %d: expected %d, got %d", i, expectedSeq, ev.SequenceNum)
+			return status, fmt.Errorf("sequence gap at index %d: expected %d, got %d", i, expectedSeq, ev.SequenceNum)
 		}
 		if ev.PrevHash != expectedPrev {
-			return false, ev.SequenceNum, ev.EventHash, fmt.Errorf("hash chain broken at sequence %d: prev_hash mismatch", ev.SequenceNum)
+			return status, fmt.Errorf("hash chain broken at sequence %d: prev_hash mismatch", ev.SequenceNum)
 		}
 
-		computedHash := CalculateEventHash(ev.SequenceNum, ev.PrevHash, ev.Action, ev.Actor, ev.TargetID, ev.DetailsJSON, ev.CreatedAt)
-		if computedHash != ev.EventHash {
-			return false, ev.SequenceNum, ev.EventHash, fmt.Errorf("event hash mismatch at sequence %d: recorded=%s computed=%s", ev.SequenceNum, ev.EventHash, computedHash)
+		computed := l.eventHash(ev.SequenceNum, ev.PrevHash, ev.Action, ev.Actor, ev.TargetID, ev.DetailsJSON, ev.CreatedAt)
+		if !hmac.Equal([]byte(computed), []byte(ev.EventHash)) {
+			return status, fmt.Errorf("event hash mismatch at sequence %d", ev.SequenceNum)
 		}
 
 		expectedPrev = ev.EventHash
 	}
 
-	return true, int64(len(events)), expectedPrev, nil
+	status.Valid = true
+	status.Count = int64(len(events))
+	status.LastHash = expectedPrev
+	return status, nil
 }
