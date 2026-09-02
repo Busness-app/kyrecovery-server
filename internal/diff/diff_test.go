@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/diff"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/diff"
 )
 
 func TestCompareManifests(t *testing.T) {
@@ -31,13 +31,13 @@ func TestCompareManifests(t *testing.T) {
 		ServiceName: "kysignon",
 		PayloadHash: "hash-v2",
 		Files: []capsule.FileEntry{
-			{Path: "data/users.db", SizeBytes: 1500, SHA256: "hash-db-2"}, // modified
+			{Path: "data/users.db", SizeBytes: 1500, SHA256: "hash-db-2"},  // modified
 			{Path: "config/app.env", SizeBytes: 200, SHA256: "hash-env-1"}, // unchanged
 			{Path: "keys/new.key", SizeBytes: 600, SHA256: "hash-key-new"}, // added (old.key removed)
 		},
 		Dependencies: []capsule.Dependency{
-			{Name: "PORT_8080", Type: "port"}, // unchanged
-			{Name: "KY_ISSUER", Type: "env"},  // unchanged
+			{Name: "PORT_8080", Type: "port"},     // unchanged
+			{Name: "KY_ISSUER", Type: "env"},      // unchanged
 			{Name: "KY_ADMIN_EMAIL", Type: "env"}, // added
 		},
 	}

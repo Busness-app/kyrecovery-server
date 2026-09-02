@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
 
 // CeremonyStatus indicates the lifecycle phase of a quorum gathering ceremony.

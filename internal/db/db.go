@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"kyrecovery-server/internal/secrets"
+	"github.com/Busness-app/kyrecovery-server/internal/secrets"
 )
 
 // CapsuleRecord stores metadata for a stored capsule.

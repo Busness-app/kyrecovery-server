@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"kyrecovery-server/internal/adapter"
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/kyrecovery-server/internal/adapter"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
 
 func TestKySignOnAdapterCaptureAndVerify(t *testing.T) {

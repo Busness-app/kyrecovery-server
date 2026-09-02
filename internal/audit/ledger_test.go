@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 func TestAuditLedgerChainingAndVerification(t *testing.T) {

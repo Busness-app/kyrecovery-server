@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"strings"
 
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 // FileDiffItem represents changes to a single file between two capsules.
 type FileDiffItem struct {
-	Path        string `json:"path"`
-	Status      string `json:"status"` // "added", "removed", "modified", "unchanged"
+	Path         string `json:"path"`
+	Status       string `json:"status"` // "added", "removed", "modified", "unchanged"
 	OldSizeBytes int64  `json:"old_size_bytes"`
 	NewSizeBytes int64  `json:"new_size_bytes"`
-	SizeDelta   int64  `json:"size_delta"`
-	OldHash     string `json:"old_hash,omitempty"`
-	NewHash     string `json:"new_hash,omitempty"`
+	SizeDelta    int64  `json:"size_delta"`
+	OldHash      string `json:"old_hash,omitempty"`
+	NewHash      string `json:"new_hash,omitempty"`
 }
 
 // DependencyDiffItem tracks environment or port changes.
@@ -29,14 +29,14 @@ type DependencyDiffItem struct {
 
 // CapsuleDiffReport summarizes the differences between two capsule versions.
 type CapsuleDiffReport struct {
-	BaseCapsuleID     string               `json:"base_capsule_id"`
-	TargetCapsuleID   string               `json:"target_capsule_id"`
-	ServiceName       string               `json:"service_name"`
-	TotalFilesDelta   int                  `json:"total_files_delta"`
-	TotalSizeDelta    int64                `json:"total_size_delta"`
-	IdenticalPayload  bool                 `json:"identical_payload"`
-	FileDiffs         []FileDiffItem       `json:"file_diffs"`
-	DependencyDiffs   []DependencyDiffItem `json:"dependency_diffs"`
+	BaseCapsuleID    string               `json:"base_capsule_id"`
+	TargetCapsuleID  string               `json:"target_capsule_id"`
+	ServiceName      string               `json:"service_name"`
+	TotalFilesDelta  int                  `json:"total_files_delta"`
+	TotalSizeDelta   int64                `json:"total_size_delta"`
+	IdenticalPayload bool                 `json:"identical_payload"`
+	FileDiffs        []FileDiffItem       `json:"file_diffs"`
+	DependencyDiffs  []DependencyDiffItem `json:"dependency_diffs"`
 }
 
 // CompareManifests computes a content-blind diff between two capsule manifests.

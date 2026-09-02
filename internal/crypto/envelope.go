@@ -17,9 +17,9 @@ const (
 	ArgonTime    = 3
 	ArgonMemory  = 64 * 1024 // 64 MB
 	ArgonThreads = 4
-	KeyLength    = 32        // 256-bit AES key
+	KeyLength    = 32 // 256-bit AES key
 	SaltLength   = 16
-	NonceLength  = 12        // Standard GCM nonce length
+	NonceLength  = 12 // Standard GCM nonce length
 )
 
 // GenerateRandomBytes returns cryptographically secure random bytes of length n.

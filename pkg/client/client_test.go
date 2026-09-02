@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/auth"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/pairing"
-	"kyrecovery-server/internal/server"
-	"kyrecovery-server/pkg/client"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/auth"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/pairing"
+	"github.com/Busness-app/kyrecovery-server/internal/server"
+	"github.com/Busness-app/kyrecovery-server/pkg/client"
 )
 
 func TestClientSDKFlow(t *testing.T) {

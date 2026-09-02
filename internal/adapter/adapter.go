@@ -3,7 +3,7 @@ package adapter
 import (
 	"context"
 
-	"kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
 )
 
 // CheckItem represents a discrete verification step during a restore drill.

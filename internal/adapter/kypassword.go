@@ -9,7 +9,7 @@ import (
 	"encoding/pem"
 	"os"
 
-	"kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
 	_ "modernc.org/sqlite"
 )
 

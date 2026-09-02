@@ -17,7 +17,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
 
 const (

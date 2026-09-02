@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 // Request body ceilings. Every API route is bounded; backup pushes get a larger

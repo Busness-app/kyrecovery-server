@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"kyrecovery-server/internal/auth"
+	"github.com/Busness-app/kyrecovery-server/internal/auth"
 )
 
 // TestRequiredRolePolicy pins the authorization decision for every API route, for

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"kyrecovery-server/internal/adapter"
-	"kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/adapter"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
 
 	_ "modernc.org/sqlite"
 )

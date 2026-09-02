@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"kyrecovery-server/internal/adapter"
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/crypto"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/drill"
+	"github.com/Busness-app/kyrecovery-server/internal/adapter"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/drill"
 )
 
 // ANSI color codes

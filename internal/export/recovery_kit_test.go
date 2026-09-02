@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/export"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/export"
 )
 
 func TestGenerateRecoveryKit(t *testing.T) {

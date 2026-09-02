@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 func TestDatabaseOperations(t *testing.T) {

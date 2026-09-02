@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/pairing"
-	"kyrecovery-server/internal/server"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/pairing"
+	"github.com/Busness-app/kyrecovery-server/internal/server"
 
 	_ "modernc.org/sqlite"
 )

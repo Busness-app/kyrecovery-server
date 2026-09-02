@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 // KitData holds all details needed to render an Emergency Recovery Kit.
