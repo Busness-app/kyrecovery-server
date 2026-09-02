@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"kyrecovery-server/internal/adapter"
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/adapter"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 // GeneratePairingCode creates a new ephemeral pairing code for connecting a product.

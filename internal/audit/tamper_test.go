@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/secrets"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/secrets"
 
 	_ "modernc.org/sqlite"
 )

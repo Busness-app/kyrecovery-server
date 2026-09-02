@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/replication"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/replication"
 )
 
 func TestLocalReplication(t *testing.T) {

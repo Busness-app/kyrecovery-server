@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kyrecovery-server/internal/auth"
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/auth"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 func TestPKCEGeneration(t *testing.T) {

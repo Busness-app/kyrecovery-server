@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/adapter"
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/pairing"
+	"github.com/Busness-app/kyrecovery-server/internal/adapter"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/pairing"
 )
 
 func TestPairingAndSelfDeclaredIngest(t *testing.T) {

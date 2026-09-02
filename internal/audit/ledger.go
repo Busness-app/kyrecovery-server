@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/secrets"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/secrets"
 )
 
 const GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/auth"
+	"github.com/Busness-app/kyrecovery-server/internal/auth"
 )
 
 // fakeIssuer is a minimal OIDC provider: discovery, JWKS and a token endpoint

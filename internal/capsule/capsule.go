@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
 
 // Dependency describes a prerequisite environment, certificate, or network service.

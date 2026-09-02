@@ -78,26 +78,26 @@ func ClaimPairing(ctx context.Context, serverURL, pairingCode, appName string) (
 
 // BackupPushPayload represents the self-declared payload pushed to KyRecovery.
 type BackupPushPayload struct {
-	ServiceName        string                 `json:"service_name"`
-	AppName            string                 `json:"app_name"`
-	AppVersion         string                 `json:"app_version"`
-	Threshold          int                    `json:"threshold"`
-	TotalShares        int                    `json:"total_shares"`
-	Passphrase         string                 `json:"passphrase,omitempty"`
-	Dependencies       []map[string]interface{} `json:"dependencies,omitempty"`
-	VerifyRecipe       map[string]interface{} `json:"verify_recipe,omitempty"`
-	Files              map[string]string      `json:"files"` // relative_path -> base64_content
+	ServiceName  string                   `json:"service_name"`
+	AppName      string                   `json:"app_name"`
+	AppVersion   string                   `json:"app_version"`
+	Threshold    int                      `json:"threshold"`
+	TotalShares  int                      `json:"total_shares"`
+	Passphrase   string                   `json:"passphrase,omitempty"`
+	Dependencies []map[string]interface{} `json:"dependencies,omitempty"`
+	VerifyRecipe map[string]interface{}   `json:"verify_recipe,omitempty"`
+	Files        map[string]string        `json:"files"` // relative_path -> base64_content
 }
 
 // PushResponse returned by KyRecovery upon successful ingest and drill.
 type PushResponse struct {
-	Status       string                 `json:"status"`
-	CapsuleID    string                 `json:"capsule_id"`
-	ServiceName  string                 `json:"service_name"`
-	SizeBytes    int64                  `json:"size_bytes"`
-	PayloadHash  string                 `json:"payload_hash"`
+	Status       string                   `json:"status"`
+	CapsuleID    string                   `json:"capsule_id"`
+	ServiceName  string                   `json:"service_name"`
+	SizeBytes    int64                    `json:"size_bytes"`
+	PayloadHash  string                   `json:"payload_hash"`
 	Shares       []map[string]interface{} `json:"shares,omitempty"`
-	DrillSummary map[string]interface{} `json:"drill_summary,omitempty"`
+	DrillSummary map[string]interface{}   `json:"drill_summary,omitempty"`
 }
 
 // PushBackup uploads a self-declared backup payload to KyRecovery.

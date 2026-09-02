@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 // Manager coordinates replication of encrypted capsules to offsite storage targets.

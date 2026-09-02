@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kyrecovery-server/internal/capsule"
-	"kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/kyrecovery-server/internal/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
 
 func TestStreamingPackAndUnpack(t *testing.T) {

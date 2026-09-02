@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"kyrecovery-server/internal/audit"
-	"kyrecovery-server/internal/auth"
-	"kyrecovery-server/internal/db"
-	"kyrecovery-server/internal/server"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/auth"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/server"
 )
 
 // These cover the findings of the 2026-08-22 security audit. Each one failed
