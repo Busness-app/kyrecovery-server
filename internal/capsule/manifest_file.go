@@ -35,6 +35,9 @@ func ReadManifestFromFile(capsulePath string) (*Manifest, error) {
 			if err := json.Unmarshal(data, &m); err != nil {
 				return nil, err
 			}
+			if err := m.verifyBinding(); err != nil {
+				return nil, err
+			}
 			return &m, nil
 		}
 	}

@@ -48,6 +48,18 @@ type Manifest struct {
 	AAD          string       `json:"aad"`
 }
 
+// verifyBinding rejects ambiguous or internally inconsistent identity metadata.
+// Authenticity is established only when decryption verifies this AAD.
+func (m *Manifest) verifyBinding() error {
+	if strings.Contains(m.CapsuleID, ":") || strings.Contains(m.ServiceName, ":") {
+		return errors.New("manifest identity fields must not contain ':'")
+	}
+	if m.AAD != m.CapsuleID+":"+m.ServiceName {
+		return errors.New("manifest identity does not match its authenticated data")
+	}
+	return nil
+}
+
 // PackOptions holds parameters for assembling an encrypted capsule.
 type PackOptions struct {
 	CapsuleID    string
@@ -77,6 +89,9 @@ func Pack(opts PackOptions) (*PackResult, error) {
 	}
 	if opts.TotalShares < opts.Threshold {
 		opts.TotalShares = opts.Threshold
+	}
+	if strings.Contains(opts.CapsuleID, ":") || strings.Contains(opts.ServiceName, ":") {
+		return nil, errors.New("capsule ID and service name must not contain ':'")
 	}
 
 	// 1. Generate master key
@@ -244,6 +259,9 @@ func Unpack(capsuleBytes []byte, masterKey []byte) (*Manifest, map[string][]byte
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return nil, nil, fmt.Errorf("invalid manifest: %w", err)
 	}
+	if err := manifest.verifyBinding(); err != nil {
+		return nil, nil, err
+	}
 
 	// Decrypt payload
 	decryptedPayload, err := crypto.DecryptAESGCM(payloadEnc, masterKey, nonce, []byte(manifest.AAD))
@@ -317,6 +335,9 @@ func ReadManifest(capsuleBytes []byte) (*Manifest, error) {
 			}
 			var m Manifest
 			if err := json.Unmarshal(data, &m); err != nil {
+				return nil, err
+			}
+			if err := m.verifyBinding(); err != nil {
 				return nil, err
 			}
 			return &m, nil

@@ -100,14 +100,8 @@ func (r *Runner) Execute(ctx context.Context, params DrillParams) (*DrillExecuti
 		return nil, fmt.Errorf("insufficient shares provided: need %d shares, received %d", manifest.Threshold, len(params.Shares))
 	}
 
-	// 2. Select service adapter
-	adp, exists := r.adapters[manifest.ServiceName]
-	if !exists {
-		return nil, fmt.Errorf("no adapter registered for service %q", manifest.ServiceName)
-	}
-
-	// 3. Create isolated ephemeral directory with restricted 0700 permissions
-	scratchDir, err := os.MkdirTemp("", fmt.Sprintf("kyrecovery-drill-%s-*", manifest.CapsuleID))
+	// 2. Create isolated ephemeral directory with restricted 0700 permissions
+	scratchDir, err := os.MkdirTemp("", "kyrecovery-drill-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed creating ephemeral drill sandbox: %w", err)
 	}
@@ -117,9 +111,10 @@ func (r *Runner) Execute(ctx context.Context, params DrillParams) (*DrillExecuti
 		}
 	}()
 
-	// 4. Decrypt and extract capsule into ephemeral sandbox (Streaming O(1) RAM)
+	// 3. Decrypt and extract capsule into ephemeral sandbox (Streaming O(1) RAM).
+	// Only the manifest returned here has had its AAD authenticated.
 	if params.CapsulePath != "" {
-		_, err = capsule.UnpackToDirectoryStream(params.CapsulePath, key, scratchDir)
+		manifest, err = capsule.UnpackToDirectoryStream(params.CapsulePath, key, scratchDir)
 		if err != nil {
 			return nil, fmt.Errorf("streaming drill decrypt & unpack failed: %w", err)
 		}
@@ -132,6 +127,12 @@ func (r *Runner) Execute(ctx context.Context, params DrillParams) (*DrillExecuti
 			return nil, fmt.Errorf("failed extracting payload into drill sandbox: %w", err)
 		}
 		manifest = unpackedManifest
+	}
+
+	// 4. Select the adapter from authenticated manifest identity.
+	adp, exists := r.adapters[manifest.ServiceName]
+	if !exists {
+		return nil, fmt.Errorf("no adapter registered for service %q", manifest.ServiceName)
 	}
 
 	// 5. Execute verification checks

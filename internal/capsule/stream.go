@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Busness-app/kyrecovery-server/internal/crypto"
@@ -36,6 +37,9 @@ func PackDirectoryStream(sourceDir, destCapsulePath string, opts PackOptions) (*
 	}
 	if opts.TotalShares < opts.Threshold {
 		opts.TotalShares = opts.Threshold + 1
+	}
+	if strings.Contains(opts.CapsuleID, ":") || strings.Contains(opts.ServiceName, ":") {
+		return nil, errors.New("capsule ID and service name must not contain ':'")
 	}
 
 	// 1. Generate master key & Shamir shares
@@ -295,10 +299,21 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 		}
 
 		if hdr.Name == "manifest.json" {
-			manifestBytes, _ = io.ReadAll(tr)
-			_ = json.Unmarshal(manifestBytes, &manifest)
+			manifestBytes, err = io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("failed reading manifest.json: %w", err)
+			}
+			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+				return nil, fmt.Errorf("invalid manifest: %w", err)
+			}
+			if err := manifest.verifyBinding(); err != nil {
+				return nil, err
+			}
 		} else if hdr.Name == "nonce.bin" {
-			nonce, _ = io.ReadAll(tr)
+			nonce, err = io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("failed reading nonce.bin: %w", err)
+			}
 		} else if hdr.Name == "payload.stream.enc" {
 			hasPayload = true
 			isStreamEnc = true
@@ -323,6 +338,10 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 		return m, ExtractToDirectory(files, destDir)
 	}
 
+	if len(nonce) != crypto.NonceLength {
+		return nil, fmt.Errorf("invalid nonce size: got %d, expected %d", len(nonce), crypto.NonceLength)
+	}
+
 	if !isStreamEnc {
 		// Single chunk payload
 		encData, err := io.ReadAll(tr)
@@ -332,6 +351,9 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 		plain, err := crypto.DecryptAESGCM(encData, masterKey, nonce, []byte(manifest.AAD))
 		if err != nil {
 			return nil, err
+		}
+		if sum := sha256.Sum256(plain); hex.EncodeToString(sum[:]) != manifest.PayloadHash {
+			return nil, errors.New("payload integrity check failed: hash mismatch")
 		}
 		gr, err := gzip.NewReader(bytes.NewReader(plain))
 		if err != nil {
@@ -343,9 +365,15 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 
 	// Stream decrypt chunked payload to temporary decompressed tar pipe
 	pr, pw := io.Pipe()
+	defer pr.Close() // an early return here must not strand the decrypt goroutine
+	hashed := make(chan string, 1)
 
 	go func() {
-		defer pw.Close()
+		payloadHasher := sha256.New()
+		defer func() {
+			pw.Close()
+			hashed <- hex.EncodeToString(payloadHasher.Sum(nil))
+		}()
 		block, err := aes.NewCipher(masterKey)
 		if err != nil {
 			pw.CloseWithError(err)
@@ -370,7 +398,13 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 				return
 			}
 
+			// The length prefix is not authenticated, so it sizes nothing until
+			// it is known to be sane: a 4-byte header must not book 4 GiB.
 			chunkLen := binary.BigEndian.Uint32(lenBuf)
+			if chunkLen > StreamChunkSize+uint32(gcm.Overhead()) {
+				pw.CloseWithError(fmt.Errorf("capsule declares an oversized %d-byte chunk", chunkLen))
+				return
+			}
 			cipherChunk := make([]byte, chunkLen)
 			if _, err := io.ReadFull(tr, cipherChunk); err != nil {
 				pw.CloseWithError(err)
@@ -388,6 +422,7 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 				return
 			}
 
+			payloadHasher.Write(plainChunk)
 			if _, err := pw.Write(plainChunk); err != nil {
 				pw.CloseWithError(err)
 				return
@@ -404,6 +439,15 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 
 	if err := extractTarReaderToDir(tar.NewReader(gr), destDir); err != nil {
 		return nil, err
+	}
+
+	// Drain whatever the archive holds past the gzip stream so the decrypt
+	// goroutine reaches its own end and hands over the hash it accumulated.
+	if _, err := io.Copy(io.Discard, pr); err != nil {
+		return nil, err
+	}
+	if sum := <-hashed; sum != manifest.PayloadHash {
+		return nil, fmt.Errorf("payload integrity check failed: hash mismatch (got %s, expected %s)", sum, manifest.PayloadHash)
 	}
 
 	return &manifest, nil
