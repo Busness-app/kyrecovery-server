@@ -48,11 +48,12 @@ type Manifest struct {
 	AAD          string       `json:"aad"`
 }
 
-// verifyBinding rejects a manifest whose identity drifted from its AAD. AES-GCM
-// binds only the AAD to the ciphertext, so capsule_id and service_name are
-// trustworthy only while they still agree with it -- and the drill runner picks
-// its adapter from service_name before anything is decrypted.
+// verifyBinding rejects ambiguous or internally inconsistent identity metadata.
+// Authenticity is established only when decryption verifies this AAD.
 func (m *Manifest) verifyBinding() error {
+	if strings.Contains(m.CapsuleID, ":") || strings.Contains(m.ServiceName, ":") {
+		return errors.New("manifest identity fields must not contain ':'")
+	}
 	if m.AAD != m.CapsuleID+":"+m.ServiceName {
 		return errors.New("manifest identity does not match its authenticated data")
 	}
@@ -88,6 +89,9 @@ func Pack(opts PackOptions) (*PackResult, error) {
 	}
 	if opts.TotalShares < opts.Threshold {
 		opts.TotalShares = opts.Threshold
+	}
+	if strings.Contains(opts.CapsuleID, ":") || strings.Contains(opts.ServiceName, ":") {
+		return nil, errors.New("capsule ID and service name must not contain ':'")
 	}
 
 	// 1. Generate master key

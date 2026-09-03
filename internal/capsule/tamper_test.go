@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rewriteCapsule rebuilds a .kycap tar, substituting entry bodies. A nil body
@@ -171,6 +172,58 @@ func TestManifestIdentityMustMatchAAD(t *testing.T) {
 	}
 }
 
+func TestManifestIdentityCannotUseAmbiguousDelimiter(t *testing.T) {
+	for _, pack := range []struct {
+		name string
+		run  func(PackOptions) error
+	}{
+		{"memory", func(opts PackOptions) error { _, err := Pack(opts); return err }},
+		{"stream", func(opts PackOptions) error {
+			_, err := PackDirectoryStream(t.TempDir(), filepath.Join(t.TempDir(), "bad.kycap"), opts)
+			return err
+		}},
+	} {
+		t.Run(pack.name, func(t *testing.T) {
+			if err := pack.run(PackOptions{CapsuleID: "cap:real", ServiceName: "kypassword", Threshold: 2, TotalShares: 3}); err == nil {
+				t.Fatal("colon-bearing capsule ID accepted")
+			}
+			if err := pack.run(PackOptions{CapsuleID: "cap-real", ServiceName: "ky:password", Threshold: 2, TotalShares: 3}); err == nil {
+				t.Fatal("colon-bearing service name accepted")
+			}
+		})
+	}
+
+	capPath, res := packStreamFixture(t)
+	m := *manifestOf(t, capPath)
+	m.CapsuleID = "cap"
+	m.ServiceName = "real:kypassword"
+	bad := rewriteCapsule(t, capPath, map[string][]byte{"manifest.json": marshal(t, m)})
+	if _, err := ReadManifestFromFile(bad); err == nil {
+		t.Error("ambiguous identity split accepted before decryption")
+	}
+	if _, err := UnpackToDirectoryStream(bad, res.MasterKey, t.TempDir()); err == nil {
+		t.Error("ambiguous identity split accepted during unpack")
+	}
+}
+
+func TestConsistentManifestRewriteFailsAuthentication(t *testing.T) {
+	capPath, res := packStreamFixture(t)
+	m := *manifestOf(t, capPath)
+	m.CapsuleID = "cap-attacker"
+	m.ServiceName = "kysignon"
+	m.AAD = m.CapsuleID + ":" + m.ServiceName
+	bad := rewriteCapsule(t, capPath, map[string][]byte{"manifest.json": marshal(t, m)})
+
+	// A manifest-only reader cannot authenticate public metadata without a key.
+	// The unpack boundary must reject the rewrite before any consumer uses it.
+	if _, err := ReadManifestFromFile(bad); err != nil {
+		t.Fatalf("self-consistent public manifest rejected as malformed: %v", err)
+	}
+	if _, err := UnpackToDirectoryStream(bad, res.MasterKey, t.TempDir()); err == nil {
+		t.Fatal("consistently rewritten identity authenticated")
+	}
+}
+
 func TestFileCapsuleIdentityMustMatchAAD(t *testing.T) {
 	capPath, res := packFileFixture(t)
 	m := *manifestOf(t, capPath)
@@ -284,5 +337,53 @@ func TestOversizedChunkLengthIsRejected(t *testing.T) {
 	}
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<20 {
 		t.Fatalf("a %d-byte capsule drove %d bytes of allocation", 4096, grew)
+	}
+}
+
+// A short nonce.bin must not reach gcm.Open: the streaming path derives the
+// chunk nonce by slicing it, so an undersized one panics the whole process.
+func TestShortNonceIsRejected(t *testing.T) {
+	capPath, res := packStreamFixture(t)
+	bad := rewriteCapsule(t, capPath, map[string][]byte{"nonce.bin": {1, 2, 3}})
+
+	if _, err := UnpackToDirectoryStream(bad, res.MasterKey, t.TempDir()); err == nil {
+		t.Fatal("short nonce accepted")
+	}
+}
+
+// An early return must not strand the decrypt goroutine on pw.Write.
+func TestNoGoroutineLeakOnExtractFailure(t *testing.T) {
+	src := t.TempDir()
+	big := make([]byte, 3*StreamChunkSize) // several chunks, so the writer blocks
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "big.db"), big, 0600); err != nil {
+		t.Fatal(err)
+	}
+	capPath := filepath.Join(t.TempDir(), "big.kycap")
+	res, err := PackDirectoryStream(src, capPath, PackOptions{
+		CapsuleID: "cap-real", ServiceName: "kypassword", Threshold: 2, TotalShares: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A regular file where the destination directory should be: extraction
+	// fails on its first MkdirAll, while the decrypt goroutine is mid-stream.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	before := runtime.NumGoroutine()
+	if _, err := UnpackToDirectoryStream(capPath, res.MasterKey, blocked); err == nil {
+		t.Fatal("expected extraction to fail")
+	}
+	for i := 0; i < 200 && runtime.NumGoroutine() > before; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if after := runtime.NumGoroutine(); after > before {
+		t.Fatalf("goroutine leaked: %d before, %d after", before, after)
 	}
 }

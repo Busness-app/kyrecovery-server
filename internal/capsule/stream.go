@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Busness-app/kyrecovery-server/internal/crypto"
@@ -36,6 +37,9 @@ func PackDirectoryStream(sourceDir, destCapsulePath string, opts PackOptions) (*
 	}
 	if opts.TotalShares < opts.Threshold {
 		opts.TotalShares = opts.Threshold + 1
+	}
+	if strings.Contains(opts.CapsuleID, ":") || strings.Contains(opts.ServiceName, ":") {
+		return nil, errors.New("capsule ID and service name must not contain ':'")
 	}
 
 	// 1. Generate master key & Shamir shares
@@ -295,7 +299,10 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 		}
 
 		if hdr.Name == "manifest.json" {
-			manifestBytes, _ = io.ReadAll(tr)
+			manifestBytes, err = io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("failed reading manifest.json: %w", err)
+			}
 			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 				return nil, fmt.Errorf("invalid manifest: %w", err)
 			}
@@ -303,7 +310,10 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 				return nil, err
 			}
 		} else if hdr.Name == "nonce.bin" {
-			nonce, _ = io.ReadAll(tr)
+			nonce, err = io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("failed reading nonce.bin: %w", err)
+			}
 		} else if hdr.Name == "payload.stream.enc" {
 			hasPayload = true
 			isStreamEnc = true
@@ -326,6 +336,10 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 			return nil, err
 		}
 		return m, ExtractToDirectory(files, destDir)
+	}
+
+	if len(nonce) != crypto.NonceLength {
+		return nil, fmt.Errorf("invalid nonce size: got %d, expected %d", len(nonce), crypto.NonceLength)
 	}
 
 	if !isStreamEnc {
@@ -351,6 +365,7 @@ func UnpackToDirectoryStream(capsulePath string, masterKey []byte, destDir strin
 
 	// Stream decrypt chunked payload to temporary decompressed tar pipe
 	pr, pw := io.Pipe()
+	defer pr.Close() // an early return here must not strand the decrypt goroutine
 	hashed := make(chan string, 1)
 
 	go func() {
