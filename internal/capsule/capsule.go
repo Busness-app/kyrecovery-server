@@ -48,6 +48,17 @@ type Manifest struct {
 	AAD          string       `json:"aad"`
 }
 
+// verifyBinding rejects a manifest whose identity drifted from its AAD. AES-GCM
+// binds only the AAD to the ciphertext, so capsule_id and service_name are
+// trustworthy only while they still agree with it -- and the drill runner picks
+// its adapter from service_name before anything is decrypted.
+func (m *Manifest) verifyBinding() error {
+	if m.AAD != m.CapsuleID+":"+m.ServiceName {
+		return errors.New("manifest identity does not match its authenticated data")
+	}
+	return nil
+}
+
 // PackOptions holds parameters for assembling an encrypted capsule.
 type PackOptions struct {
 	CapsuleID    string
@@ -244,6 +255,9 @@ func Unpack(capsuleBytes []byte, masterKey []byte) (*Manifest, map[string][]byte
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return nil, nil, fmt.Errorf("invalid manifest: %w", err)
 	}
+	if err := manifest.verifyBinding(); err != nil {
+		return nil, nil, err
+	}
 
 	// Decrypt payload
 	decryptedPayload, err := crypto.DecryptAESGCM(payloadEnc, masterKey, nonce, []byte(manifest.AAD))
@@ -317,6 +331,9 @@ func ReadManifest(capsuleBytes []byte) (*Manifest, error) {
 			}
 			var m Manifest
 			if err := json.Unmarshal(data, &m); err != nil {
+				return nil, err
+			}
+			if err := m.verifyBinding(); err != nil {
 				return nil, err
 			}
 			return &m, nil
