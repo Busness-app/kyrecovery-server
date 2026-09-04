@@ -3,18 +3,15 @@ package client
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 )
 
-// Client provides an easy Go integration SDK for pushing self-declared backups to KyRecovery Server.
+// Client is the Go SDK for talking to a KyRecovery server.
 type Client struct {
 	ServerURL  string
 	APIToken   string
@@ -38,6 +35,11 @@ type ClaimResponse struct {
 	APIToken    string     `json:"api_token"`
 	Status      string     `json:"status"`
 	PairedAt    *time.Time `json:"paired_at,omitempty"`
+	// RecoveryPublicKey is the suite recovery public key this store pins, standard base64.
+	// Everything the product later deposits must be sealed to it.
+	RecoveryPublicKey string `json:"recovery_public_key"`
+	Threshold         int    `json:"threshold"`
+	TotalShares       int    `json:"total_shares"`
 }
 
 // ClaimPairing exchanges a 6-digit PIN code for a permanent client Bearer token.
@@ -57,7 +59,7 @@ func ClaimPairing(ctx context.Context, serverURL, pairingCode, appName string) (
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("pairing request failed: %w", err)
 	}
@@ -73,109 +75,42 @@ func ClaimPairing(ctx context.Context, serverURL, pairingCode, appName string) (
 		return nil, nil, fmt.Errorf("failed decoding claim response: %w", err)
 	}
 
+	if claimResp.RecoveryPublicKey == "" {
+		return nil, nil, fmt.Errorf("server returned no recovery public key; the ceremony has not run")
+	}
+
 	return NewClient(serverURL, claimResp.APIToken), &claimResp, nil
 }
 
-// BackupPushPayload represents the self-declared payload pushed to KyRecovery.
-type BackupPushPayload struct {
-	ServiceName  string                   `json:"service_name"`
-	AppName      string                   `json:"app_name"`
-	AppVersion   string                   `json:"app_version"`
-	Threshold    int                      `json:"threshold"`
-	TotalShares  int                      `json:"total_shares"`
-	Passphrase   string                   `json:"passphrase,omitempty"`
-	Dependencies []map[string]interface{} `json:"dependencies,omitempty"`
-	VerifyRecipe map[string]interface{}   `json:"verify_recipe,omitempty"`
-	Files        map[string]string        `json:"files"` // relative_path -> base64_content
+// DepositResponse is what the store returns for a stored container.
+type DepositResponse struct {
+	CapsuleID   string    `json:"capsule_id"`
+	Digest      string    `json:"digest"`
+	SizeBytes   int64     `json:"size_bytes"`
+	DepositedAt time.Time `json:"deposited_at"`
 }
 
-// PushResponse returned by KyRecovery upon successful ingest and drill.
-type PushResponse struct {
-	Status       string                   `json:"status"`
-	CapsuleID    string                   `json:"capsule_id"`
-	ServiceName  string                   `json:"service_name"`
-	SizeBytes    int64                    `json:"size_bytes"`
-	PayloadHash  string                   `json:"payload_hash"`
-	Shares       []map[string]interface{} `json:"shares,omitempty"`
-	DrillSummary map[string]interface{}   `json:"drill_summary,omitempty"`
-}
-
-// PushBackup uploads a self-declared backup payload to KyRecovery.
-func (c *Client) PushBackup(ctx context.Context, payload BackupPushPayload) (*PushResponse, error) {
-	if payload.Threshold <= 0 {
-		payload.Threshold = 2
-	}
-	if payload.TotalShares <= 0 {
-		payload.TotalShares = 3
-	}
-
-	body, err := json.Marshal(payload)
+// Deposit stores a sealed container. The bytes are opaque to the server; it can only check
+// that they are sealed to the key it handed out at pairing.
+func (c *Client) Deposit(ctx context.Context, container []byte) (*DepositResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ServerURL+"/api/backup/deposit", bytes.NewReader(container))
 	if err != nil {
 		return nil, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/backup/push", c.ServerURL), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.APIToken))
-	req.Header.Set("Content-Type", "application/json")
-
+	req.Header.Set("Authorization", "Bearer "+c.APIToken)
+	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("backup push request failed: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-
-	respBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("backup push rejected (HTTP %d): %s", resp.StatusCode, string(respBytes))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("deposit: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-
-	var pushResp PushResponse
-	if err := json.Unmarshal(respBytes, &pushResp); err != nil {
-		return nil, fmt.Errorf("failed decoding push response: %w", err)
+	var out DepositResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
 	}
-
-	return &pushResp, nil
-}
-
-// PushDirectory gathers files from a local service directory and pushes them as a self-declared backup.
-func (c *Client) PushDirectory(ctx context.Context, serviceName, appName, appVersion, dirPath string, threshold, totalShares int) (*PushResponse, error) {
-	files := make(map[string]string)
-
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		relPath, err := filepath.Rel(dirPath, path)
-		if err != nil {
-			return nil
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		files[relPath] = base64.StdEncoding.EncodeToString(content)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed reading directory %s: %w", dirPath, err)
-	}
-
-	payload := BackupPushPayload{
-		ServiceName: serviceName,
-		AppName:     appName,
-		AppVersion:  appVersion,
-		Threshold:   threshold,
-		TotalShares: totalShares,
-		Files:       files,
-		VerifyRecipe: map[string]interface{}{
-			"check_sqlite_databases": true,
-			"validate_certificates":  true,
-			"validate_json_files":    true,
-		},
-	}
-
-	return c.PushBackup(ctx, payload)
+	return &out, nil
 }

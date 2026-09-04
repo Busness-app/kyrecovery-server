@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -15,16 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Busness-app/kyrecovery-server/internal/adapter"
 	"github.com/Busness-app/kyrecovery-server/internal/audit"
 	"github.com/Busness-app/kyrecovery-server/internal/auth"
-	"github.com/Busness-app/kyrecovery-server/internal/capsule"
-	"github.com/Busness-app/kyrecovery-server/internal/ceremony"
-	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 	"github.com/Busness-app/kyrecovery-server/internal/diff"
-	"github.com/Busness-app/kyrecovery-server/internal/drill"
-	"github.com/Busness-app/kyrecovery-server/internal/export"
 	"github.com/Busness-app/kyrecovery-server/internal/pairing"
 	"github.com/Busness-app/kyrecovery-server/internal/replication"
 )
@@ -49,16 +45,15 @@ type Server struct {
 	cfg         Config
 	db          *db.DB
 	ledger      *audit.Ledger
-	runner      *drill.Runner
 	authMgr     *auth.Manager
-	ceremonies  *ceremony.Manager
 	replication *replication.Manager
 	inspector   *diff.Inspector
-	adapters    map[string]adapter.ServiceAdapter
+	readBudget  time.Duration
 	claimLimit  *rateLimiter
 	loginLimit  *rateLimiter
 	pushLimit   *rateLimiter
 	pushSlots   chan struct{}
+	idLocks     idLocks
 	mux         *http.ServeMux
 }
 
@@ -71,37 +66,18 @@ func New(cfg Config, database *db.DB, ledger *audit.Ledger) (*Server, error) {
 		return nil, fmt.Errorf("failed to create capsules directory: %w", err)
 	}
 
-	ssoAdapter := adapter.NewKySignOnAdapter()
-	pwdAdapter := adapter.NewKyPasswordAdapter()
-	bkmAdapter := adapter.NewKyBookmarksAdapter()
-	notesAdapter := adapter.NewKyNotesAdapter()
-	postAdapter := adapter.NewKyPostAdapter()
-	genericAdapter := adapter.NewGenericAdapter()
-	runner := drill.NewRunner(database, ledger, ssoAdapter, pwdAdapter, bkmAdapter, notesAdapter, postAdapter, genericAdapter)
 	authMgr := auth.NewManager(cfg.Auth, database)
-	ceremonyMgr := ceremony.NewManager()
 	replMgr := replication.NewManager(database, ledger)
 	inspector := diff.NewInspector(database)
-
-	adapters := map[string]adapter.ServiceAdapter{
-		ssoAdapter.Name():     ssoAdapter,
-		pwdAdapter.Name():     pwdAdapter,
-		bkmAdapter.Name():     bkmAdapter,
-		notesAdapter.Name():   notesAdapter,
-		postAdapter.Name():    postAdapter,
-		genericAdapter.Name(): genericAdapter,
-	}
 
 	s := &Server{
 		cfg:         cfg,
 		db:          database,
 		ledger:      ledger,
-		runner:      runner,
 		authMgr:     authMgr,
-		ceremonies:  ceremonyMgr,
 		replication: replMgr,
 		inspector:   inspector,
-		adapters:    adapters,
+		readBudget:  defaultReadBudget,
 		claimLimit:  newRateLimiter(claimWindow),
 		loginLimit:  newRateLimiter(loginWindow),
 		pushLimit:   newRateLimiter(pushWindow),
@@ -148,6 +124,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/favicon.svg", faviconHandler)
 	s.mux.HandleFunc("/favicon.ico", faviconHandler)
 
+	// The ceremony page generates the recovery private key in the operator's browser.
+	// It is not under /api/, so apiPolicy does not cover it and the session is checked
+	// here; it is also the only page allowed to compile WebAssembly.
+	s.mux.HandleFunc("/admin/ceremony", func(w http.ResponseWriter, r *http.Request) {
+		session, err := s.authMgr.GetSession(r.Context(), r)
+		if err != nil || session == nil || auth.RoleRank(session.Role) < auth.RoleRank(auth.RoleAdmin) {
+			http.Error(w, "admin session required", http.StatusForbidden)
+			return
+		}
+		data, err := staticFS.ReadFile("static/ceremony.html")
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Security-Policy", ceremonyContentSecurityPolicy)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+	})
+
 	// Auth & SSO Routes
 	s.mux.HandleFunc("/api/auth/config", s.handleAuthConfig)
 	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
@@ -162,28 +158,20 @@ func (s *Server) routes() {
 	// API Routes
 	s.mux.HandleFunc("/api/readiness", s.handleReadiness)
 	s.mux.HandleFunc("/api/capsules", s.handleCapsules)
-	s.mux.HandleFunc("/api/capsules/capture", s.handleCapsuleCapture)
 	s.mux.HandleFunc("/api/capsules/", s.handleCapsuleDetail)
 	s.mux.HandleFunc("/api/custodians", s.handleCustodians)
-	s.mux.HandleFunc("/api/drills", s.handleDrills)
-	s.mux.HandleFunc("/api/drills/run", s.handleRunDrill)
 	s.mux.HandleFunc("/api/audit", s.handleAudit)
 	s.mux.HandleFunc("/api/audit/verify", s.handleAuditVerify)
+	s.mux.HandleFunc("/api/recovery-key", s.handleRecoveryKey)
 
-	// Pairing & Self-Declared Backup Ingest Routes
+	// Pairing Routes
 	s.mux.HandleFunc("/api/pairing/generate", s.handlePairingGenerate)
 	s.mux.HandleFunc("/api/pairing/list", s.handlePairingList)
 	s.mux.HandleFunc("/api/pairing/revoke", s.handlePairingRevoke)
 	s.mux.HandleFunc("/api/pairing/claim", s.handlePairingClaim)
-	s.mux.HandleFunc("/api/backup/push", s.handleBackupPush)
-	s.mux.HandleFunc("/api/v1/backup/push", s.handleBackupPush)
 
-	// Quorum Ceremony Routes
-	s.mux.HandleFunc("/api/ceremonies", s.handleCeremonies)
-	s.mux.HandleFunc("/api/ceremonies/create", s.handleCeremonyCreate)
-	s.mux.HandleFunc("/api/ceremonies/submit", s.handleCeremonySubmit)
-	s.mux.HandleFunc("/api/ceremonies/execute", s.handleCeremonyExecute)
-	s.mux.HandleFunc("/api/ceremonies/cancel", s.handleCeremonyCancel)
+	// Product deposit (bearer product token)
+	s.mux.HandleFunc("/api/backup/deposit", s.handleDeposit)
 
 	// Offsite Replication Routes
 	s.mux.HandleFunc("/api/replication/targets", s.handleReplicationTargets)
@@ -207,6 +195,13 @@ const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inl
 	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; " +
 	"form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
+// ceremonyContentSecurityPolicy applies to /admin/ceremony alone. That page has to compile
+// a WebAssembly module, which needs 'wasm-unsafe-eval'; in exchange it carries no inline
+// script or style at all, so it is stricter than the dashboard everywhere else.
+const ceremonyContentSecurityPolicy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; " +
+	"style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
+	"form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
 // rolePublic marks a route reachable without a session: it is needed to sign in,
 // or it carries its own credential (a pairing code or a product API token).
 const rolePublic = ""
@@ -223,8 +218,7 @@ var apiPolicy = map[string]string{
 	"* /api/auth/logout":       rolePublic,
 	"GET /api/auth/sso/config": rolePublic, // the sign-in page must know whether SSO is offered
 	"* /api/pairing/claim":     rolePublic, // one-time pairing code
-	"* /api/backup/push":       rolePublic, // product API token
-	"* /api/v1/backup/push":    rolePublic, // product API token
+	"* /api/backup/deposit":    rolePublic, // product API token
 
 	"* /api/auth/password":         auth.RoleViewer,
 	"GET /api/readiness":           auth.RoleViewer,
@@ -232,25 +226,19 @@ var apiPolicy = map[string]string{
 	"GET /api/capsules/diff":       auth.RoleViewer,
 	"GET /api/capsules/timeline":   auth.RoleViewer,
 	"GET /api/custodians":          auth.RoleViewer,
-	"GET /api/drills":              auth.RoleViewer,
 	"GET /api/audit":               auth.RoleViewer,
+	"GET /api/recovery-key":        auth.RoleViewer,
 	"GET /api/pairing/list":        auth.RoleViewer,
-	"GET /api/ceremonies":          auth.RoleViewer,
 	"GET /api/replication/targets": auth.RoleViewer,
 	"GET /api/replication/logs":    auth.RoleViewer,
 
-	"POST /api/capsules/capture":   auth.RoleOperator,
-	"POST /api/custodians":         auth.RoleOperator,
-	"POST /api/drills/run":         auth.RoleOperator,
-	"POST /api/audit/verify":       auth.RoleOperator,
-	"POST /api/ceremonies/create":  auth.RoleOperator,
-	"POST /api/ceremonies/submit":  auth.RoleOperator,
-	"POST /api/ceremonies/execute": auth.RoleOperator,
-	"POST /api/ceremonies/cancel":  auth.RoleOperator,
-	"POST /api/replication/sync":   auth.RoleOperator,
+	"POST /api/custodians":       auth.RoleOperator,
+	"POST /api/audit/verify":     auth.RoleOperator,
+	"POST /api/replication/sync": auth.RoleOperator,
 
 	"POST /api/auth/sso/config":          auth.RoleAdmin,
 	"POST /api/auth/sso/test":            auth.RoleAdmin,
+	"POST /api/recovery-key":             auth.RoleAdmin,
 	"POST /api/pairing/generate":         auth.RoleAdmin,
 	"POST /api/pairing/revoke":           auth.RoleAdmin,
 	"POST /api/replication/targets":      auth.RoleAdmin,
@@ -281,10 +269,10 @@ func requiredRole(method, urlPath string) string {
 	}
 
 	// Capsule sub-resources: reading metadata is a viewer action, taking the
-	// ciphertext or the runbook off the server is not.
+	// sealed bytes off the server is not.
 	if strings.HasPrefix(urlPath, "/api/capsules/") && method == http.MethodGet {
 		switch _, action := parseCapsulePath(urlPath); action {
-		case "download", "export-kit":
+		case "download":
 			return auth.RoleOperator
 		default:
 			return auth.RoleViewer
@@ -301,6 +289,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 	if r.TLS != nil {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	}
+
+	// A request that carries a body delivers it on a clock. The deposit and download raise
+	// their own budget from here; nothing lowers it.
+	if requestHasBody(r) {
+		setReadDeadline(w, s.readBudget)
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -379,20 +373,14 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	capsules, _ := s.db.ListCapsules(ctx)
 	custodians, _ := s.db.ListCustodians(ctx)
-	lastDrill, _ := s.db.GetLastDrill(ctx)
 
-	ready := len(capsules) > 0 && lastDrill != nil && lastDrill.Status == "passed"
-	var lastRTO int64 = -1
-	if lastDrill != nil {
-		lastRTO = lastDrill.DurationMs
-	}
-
+	// A blind store cannot open a capsule, so it cannot report a verified restore.
+	// It reports only what it can see: how many sealed capsules it holds. The
+	// verify sweep is what will attest their integrity.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ready":            ready,
-		"capsules_count":   len(capsules),
-		"custodians_count": len(custodians),
-		"last_rto_ms":      lastRTO,
-		"last_drill":       lastDrill,
+		"capsule_count":         len(capsules),
+		"custodian_count":       len(custodians),
+		"audit_append_disabled": s.ledger.Healthy() != nil,
 	})
 }
 
@@ -410,118 +398,7 @@ func (s *Server) handleCapsules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// 3. Capsule Capture
-type captureRequest struct {
-	ServiceName string `json:"service_name"`
-	Threshold   int    `json:"threshold"`
-	TotalShares int    `json:"total_shares"`
-}
-
-func (s *Server) handleCapsuleCapture(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	var req captureRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid JSON request")
-		return
-	}
-
-	if req.ServiceName == "" {
-		req.ServiceName = "kysignon"
-	}
-	if req.Threshold < 2 {
-		req.Threshold = 2
-	}
-	if req.TotalShares < req.Threshold {
-		req.TotalShares = req.Threshold + 1
-	}
-	if req.TotalShares > maxSharesPerCapsule {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("total_shares cannot exceed %d", maxSharesPerCapsule))
-		return
-	}
-
-	adp, exists := s.adapters[req.ServiceName]
-	if !exists {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported service %q", req.ServiceName))
-		return
-	}
-
-	ctx := r.Context()
-	files, deps, err := adp.Capture(ctx, filepath.Join(s.cfg.DataDir, "source", req.ServiceName))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Capture failed: %v", err))
-		return
-	}
-
-	capsuleID, err := newCapsuleID(req.ServiceName)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	packResult, err := capsule.Pack(capsule.PackOptions{
-		CapsuleID:    capsuleID,
-		ServiceName:  req.ServiceName,
-		Files:        files,
-		Dependencies: deps,
-		Threshold:    req.Threshold,
-		TotalShares:  req.TotalShares,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Capsule packing failed: %v", err))
-		return
-	}
-
-	capRec := db.CapsuleRecord{
-		ID:          capsuleID,
-		ServiceName: req.ServiceName,
-		FilePath:    s.capsulePath(capsuleID),
-		SizeBytes:   int64(len(packResult.CapsuleBytes)),
-		PayloadHash: packResult.Manifest.PayloadHash,
-		Threshold:   req.Threshold,
-		TotalShares: req.TotalShares,
-		Status:      "active",
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := s.publishCapsule(ctx, capRec, packResult.CapsuleBytes); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Record in audit ledger
-	_, _ = s.ledger.Record(ctx, "capsule_captured", s.actor(r), capsuleID, map[string]interface{}{
-		"service":      req.ServiceName,
-		"threshold":    req.Threshold,
-		"total_shares": req.TotalShares,
-		"size_bytes":   capRec.SizeBytes,
-	})
-
-	// Background offsite replication to configured auto targets
-	go s.replication.SyncAllAutoTargets(context.Background(), capsuleID)
-
-	// Format share responses (values returned once to admin, not stored in DB)
-	type shareResp struct {
-		Index    byte   `json:"index"`
-		ValueHex string `json:"value_hex"`
-	}
-	var shareList []shareResp
-	for _, sh := range packResult.Shares {
-		shareList = append(shareList, shareResp{
-			Index:    sh.Index,
-			ValueHex: hex.EncodeToString(sh.Value),
-		})
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"capsule":  capRec,
-		"manifest": packResult.Manifest,
-		"shares":   shareList,
-	})
-}
-
-// 4. Capsule Detail / Download / Export
+// 4. Capsule Detail / Download
 func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 	capsuleID, action := parseCapsulePath(r.URL.Path)
 	if capsuleID == "" {
@@ -531,67 +408,56 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	capRec, err := s.db.GetCapsule(ctx, capsuleID)
-	if err != nil || capRec == nil {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
+		return
+	}
+	if capRec == nil {
 		writeError(w, http.StatusNotFound, "Capsule not found")
 		return
 	}
 
 	switch action {
 	case "download":
-		capsuleBytes, err := os.ReadFile(capRec.FilePath)
+		// A corrupt row is still downloadable for forensics; the header and the JSON
+		// detail both carry the status so a caller cannot mistake it for intact.
+		f, err := os.Open(capRec.FilePath)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
 			return
 		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
+			return
+		}
+		// Taking sealed bytes off the store is the event that most needs a record, so it
+		// is written before any byte leaves — an unrecordable download does not happen.
+		if err := s.ledger.Healthy(); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Audit ledger is not writable; downloads refused until an operator repairs it")
+			return
+		}
+		details := map[string]interface{}{"digest": capRec.Digest, "status": capRec.Status, "size_bytes": info.Size()}
+		if rng := r.Header.Get("Range"); rng != "" {
+			details["range"] = rng // size_bytes is the whole file; this says what was actually asked for
+		}
+		if _, err := s.ledger.Record(ctx, "capsule_downloaded", s.actor(r), capRec.ID, details); err != nil {
+			log.Printf("download: recording capsule %s: %v", capRec.ID, err)
+			writeError(w, http.StatusServiceUnavailable, "Failed recording the download in the audit chain; download refused")
+			return
+		}
+		setWriteDeadline(w, capsuleTransferBudget)
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.kycap", capsuleID))
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Write(capsuleBytes)
+		w.Header().Set("X-Capsule-Digest", capRec.Digest)
+		w.Header().Set("X-Capsule-Status", capRec.Status)
+		// Streamed: a container may be up to capsule.MaxContainerBytes, which is not a
+		// thing to hold in memory once per concurrent download.
+		http.ServeContent(w, r, "", info.ModTime(), f)
 
-	case "export-kit":
-		format := r.URL.Query().Get("format")
-		capsuleBytes, err := os.ReadFile(capRec.FilePath)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Capsule file unreadable")
-			return
-		}
-		manifest, err := capsule.ReadManifest(capsuleBytes)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed reading capsule manifest")
-			return
-		}
-
-		custodians, _ := s.db.ListCustodians(ctx)
-		lastDrill, _ := s.db.GetLastDrill(ctx)
-
-		kitData := export.KitData{
-			CapsuleID:    manifest.CapsuleID,
-			ServiceName:  manifest.ServiceName,
-			GeneratedAt:  time.Now().UTC(),
-			Threshold:    manifest.Threshold,
-			TotalShares:  manifest.TotalShares,
-			PayloadHash:  manifest.PayloadHash,
-			Dependencies: manifest.Dependencies,
-			Files:        manifest.Files,
-			Custodians:   custodians,
-			LastDrill:    lastDrill,
-		}
-
-		_, _ = s.ledger.Record(ctx, "kit_exported", s.actor(r), capsuleID, map[string]interface{}{"format": format})
-
-		if format == "md" {
-			md := export.GenerateMarkdownRunbook(kitData)
-			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-			w.Write([]byte(md))
-			return
-		}
-
-		html, err := export.GenerateHTMLRunbook(kitData)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed generating HTML runbook")
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(html))
+	case "verify":
+		s.handleCapsuleVerify(w, r, capRec)
 
 	default:
 		writeJSON(w, http.StatusOK, capRec)
@@ -652,73 +518,6 @@ func (s *Server) handleCustodians(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// 6. Drills Handler
-func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-	drills, err := s.db.ListDrills(r.Context(), 50)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, drills)
-}
-
-// 7. Run Drill Handler
-type runDrillRequest struct {
-	CapsuleID string   `json:"capsule_id"`
-	Shares    []string `json:"shares"`
-}
-
-func (s *Server) handleRunDrill(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	var req runDrillRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CapsuleID == "" {
-		writeError(w, http.StatusBadRequest, "Capsule ID is required")
-		return
-	}
-
-	ctx := r.Context()
-	capRec, err := s.db.GetCapsule(ctx, req.CapsuleID)
-	if err != nil || capRec == nil {
-		writeError(w, http.StatusNotFound, "Capsule not found")
-		return
-	}
-
-	capsuleBytes, err := os.ReadFile(capRec.FilePath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Capsule file could not be read from disk")
-		return
-	}
-
-	var parsedShares []crypto.Share
-	for _, raw := range req.Shares {
-		sh, err := crypto.ParseShare(raw)
-		if err == nil {
-			parsedShares = append(parsedShares, sh)
-		}
-	}
-
-	summary, err := s.runner.Execute(ctx, drill.DrillParams{
-		CapsuleID:    req.CapsuleID,
-		CapsuleBytes: capsuleBytes,
-		Shares:       parsedShares,
-		Actor:        s.actor(r),
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Drill execution failed: %v", err))
-		return
-	}
-
-	writeJSON(w, http.StatusOK, summary)
-}
-
 // 8. Audit List
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -739,14 +538,22 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	status, err := s.ledger.VerifyChain(r.Context())
+	anchor, err := s.ledger.Verify(r.Context())
 	resp := map[string]interface{}{
-		"valid":     status.Valid,
-		"count":     status.Count,
-		"last_hash": status.LastHash,
+		"valid":     err == nil,
+		"count":     anchor.Count,
+		"last_hash": anchor.Hash,
 	}
 	if err != nil {
 		resp["error"] = err.Error()
+	}
+	// A ledger that refuses to append is an operator emergency even when what
+	// remains of the log verifies, so it is reported either way.
+	if unhealthy := s.ledger.Healthy(); unhealthy != nil {
+		resp["append_disabled"] = true
+		if err == nil {
+			resp["error"] = unhealthy.Error()
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -876,7 +683,19 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 		req.AppName = fmt.Sprintf("App-%s", req.PairingCode)
 	}
 
-	app, err := s.db.ClaimPairingCode(r.Context(), req.PairingCode, req.ServiceName, req.AppName)
+	key, err := s.db.GetRecoveryKey(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed reading recovery key")
+		return
+	}
+	if key == nil {
+		// Not a failed attempt by the product: the store is not ready. The code is not consumed
+		// and the limiter is not charged.
+		writeError(w, http.StatusConflict, "No recovery key imported; run the ceremony before pairing products")
+		return
+	}
+
+	app, err := s.db.ClaimPairingCode(r.Context(), req.PairingCode, req.ServiceName, req.AppName, key.KeyID)
 	if err != nil {
 		s.claimLimit.record(ipKey, now)
 		s.claimLimit.record(codeKey, now)
@@ -892,180 +711,20 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 		"service_name":     app.ServiceName,
 		"claimed_app_name": app.AppName,
 		"source_address":   clientIP(r),
+		"recovery_key_id":  key.KeyID,
 	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"id":           app.ID,
-		"status":       "paired",
-		"api_token":    app.APIToken,
-		"service_name": app.ServiceName,
-		"app_name":     app.AppName,
-		"paired_at":    app.PairedAt,
-		"server_url":   r.Host,
-	})
-}
-
-// 14. Self-Declared Backup Push
-func (s *Server) handleBackupPush(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	authHeader := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == "" || authHeader == token {
-		writeError(w, http.StatusUnauthorized, "Missing or invalid Bearer authorization token")
-		return
-	}
-
-	ctx := r.Context()
-	app, err := s.db.GetPairedAppByToken(ctx, token)
-	if err != nil || app == nil {
-		writeError(w, http.StatusUnauthorized, "Invalid or revoked API token")
-		return
-	}
-
-	// One compromised product token must not be able to fill the capsule volume.
-	now := time.Now()
-	pushKey := "push:" + app.ID
-	if s.pushLimit.exceeded(pushKey, pushesPerToken, now) {
-		writeError(w, http.StatusTooManyRequests, "Backup push rate limit exceeded for this paired product")
-		return
-	}
-	s.pushLimit.record(pushKey, now)
-
-	// Each push holds its payload in memory several times over. Queue rather than
-	// reject: a legitimate product retrying is not the problem being solved here.
-	select {
-	case s.pushSlots <- struct{}{}:
-		defer func() { <-s.pushSlots }()
-	case <-ctx.Done():
-		writeError(w, http.StatusServiceUnavailable, "Server busy ingesting backups; retry shortly")
-		return
-	}
-
-	var payload pairing.SelfDeclaredBackupPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid JSON backup payload: %v", err))
-		return
-	}
-
-	if payload.ServiceName == "" {
-		payload.ServiceName = app.ServiceName
-	}
-	if payload.Threshold < 2 {
-		payload.Threshold = 2
-	}
-	if payload.TotalShares < payload.Threshold {
-		payload.TotalShares = payload.Threshold + 1
-	}
-	if payload.TotalShares > maxSharesPerCapsule {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("total_shares cannot exceed %d", maxSharesPerCapsule))
-		return
-	}
-	if !validServiceName(payload.ServiceName) {
-		writeError(w, http.StatusBadRequest, "service_name must be 1-64 characters of [A-Za-z0-9._-]")
-		return
-	}
-
-	pushLimit := maxBackupPushBytes()
-	ingestLimits := pairing.DefaultIngestLimits()
-	if pushLimit > ingestLimits.MaxTotalBytes {
-		ingestLimits.MaxTotalBytes = pushLimit
-		ingestLimits.MaxFileBytes = pushLimit
-	}
-
-	rawFiles, deps, recipe, err := pairing.IngestSelfDeclaredBackup(payload, ingestLimits)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed processing backup payload: %v", err))
-		return
-	}
-
-	// Embed declarative recipe into capsule files
-	recipeBytes, _ := json.MarshalIndent(recipe, "", "  ")
-	rawFiles["kyrecovery-recipe.json"] = recipeBytes
-
-	capsuleID, err := newCapsuleID(payload.ServiceName)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	packResult, err := capsule.Pack(capsule.PackOptions{
-		CapsuleID:    capsuleID,
-		ServiceName:  payload.ServiceName,
-		Files:        rawFiles,
-		Dependencies: deps,
-		Threshold:    payload.Threshold,
-		TotalShares:  payload.TotalShares,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Capsule encryption failed: %v", err))
-		return
-	}
-
-	capRec := db.CapsuleRecord{
-		ID:          capsuleID,
-		ServiceName: payload.ServiceName,
-		FilePath:    s.capsulePath(capsuleID),
-		SizeBytes:   int64(len(packResult.CapsuleBytes)),
-		PayloadHash: packResult.Manifest.PayloadHash,
-		Threshold:   payload.Threshold,
-		TotalShares: payload.TotalShares,
-		Status:      "active",
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := s.publishCapsule(ctx, capRec, packResult.CapsuleBytes); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	_ = s.db.UpdateAppLastBackup(ctx, app.ID)
-
-	// Background offsite replication to configured auto targets
-	go s.replication.SyncAllAutoTargets(context.Background(), capsuleID)
-
-	// Append to audit ledger
-	_, _ = s.ledger.Record(ctx, "self_declared_backup_ingested", "paired-app:"+app.ID, capsuleID, map[string]interface{}{
-		"claimed_app_name": app.AppName,
-		"service":          payload.ServiceName,
-		"app_version":      payload.AppVersion,
-		"size_bytes":       capRec.SizeBytes,
-		"files_count":      len(rawFiles),
-		"threshold":        payload.Threshold,
-		"total_shares":     payload.TotalShares,
-	})
-
-	// Run automatic isolated verification drill with self-declared recipe
-	drillAdapter := adapter.NewGenericAdapter(recipe)
-	drillRunner := drill.NewRunner(s.db, s.ledger, drillAdapter)
-	drillSummary, _ := drillRunner.Execute(ctx, drill.DrillParams{
-		CapsuleID:    capsuleID,
-		CapsuleBytes: packResult.CapsuleBytes,
-		MasterKey:    packResult.MasterKey,
-		Actor:        app.AppName,
-	})
-
-	type shareResp struct {
-		Index    byte   `json:"index"`
-		ValueHex string `json:"value_hex"`
-	}
-	var shareList []shareResp
-	for _, sh := range packResult.Shares {
-		shareList = append(shareList, shareResp{
-			Index:    sh.Index,
-			ValueHex: hex.EncodeToString(sh.Value),
-		})
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "ingested",
-		"capsule_id":    capsuleID,
-		"service_name":  payload.ServiceName,
-		"size_bytes":    capRec.SizeBytes,
-		"payload_hash":  packResult.Manifest.PayloadHash,
-		"shares":        shareList,
-		"drill_summary": drillSummary,
+		"id":                  app.ID,
+		"status":              "paired",
+		"api_token":           app.APIToken,
+		"service_name":        app.ServiceName,
+		"app_name":            app.AppName,
+		"paired_at":           app.PairedAt,
+		"server_url":          r.Host,
+		"recovery_public_key": base64.StdEncoding.EncodeToString(key.PublicKey),
+		"threshold":           key.Threshold,
+		"total_shares":        key.TotalShares,
 	})
 }
 
@@ -1222,18 +881,18 @@ func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !auth.VerifyPassword(req.OldPassword, user.PasswordHash, user.Salt) {
+	if !auth.VerifyPassword(req.OldPassword, user.PasswordHash) {
 		writeError(w, http.StatusUnauthorized, "Current password is incorrect")
 		return
 	}
 
-	newHash, newSalt, err := auth.HashPassword(req.NewPassword)
+	newHash, err := auth.HashPassword(req.NewPassword)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed hashing new password")
 		return
 	}
 
-	if err := s.db.UpdateUserPassword(r.Context(), user.ID, newHash, newSalt); err != nil {
+	if err := s.db.UpdateUserPassword(r.Context(), user.ID, newHash); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed updating password")
 		return
 	}
@@ -1422,196 +1081,6 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	clearCookie := s.authMgr.InvalidateSession(r.Context(), r)
 	http.SetCookie(w, clearCookie)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
-}
-
-// 20. List Ceremonies
-func (s *Server) handleCeremonies(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-	sessions := s.ceremonies.ListSessions()
-	if sessions == nil {
-		sessions = []*ceremony.Session{}
-	}
-	writeJSON(w, http.StatusOK, sessions)
-}
-
-// 21. Create Ceremony
-type ceremonyCreateRequest struct {
-	CapsuleID  string `json:"capsule_id"`
-	Purpose    string `json:"purpose"`
-	TTLMinutes int    `json:"ttl_minutes"`
-}
-
-func (s *Server) handleCeremonyCreate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	var req ceremonyCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CapsuleID == "" {
-		writeError(w, http.StatusBadRequest, "CapsuleID is required")
-		return
-	}
-
-	capRec, err := s.db.GetCapsule(r.Context(), req.CapsuleID)
-	if err != nil || capRec == nil {
-		writeError(w, http.StatusNotFound, "Capsule not found")
-		return
-	}
-
-	ttl := 30 * time.Minute
-	if req.TTLMinutes > 0 {
-		ttl = time.Duration(req.TTLMinutes) * time.Minute
-	}
-	if req.Purpose == "" {
-		req.Purpose = "Quorum Verification Ceremony"
-	}
-
-	actor := s.actor(r)
-
-	sess, err := s.ceremonies.CreateSession(capRec.ID, capRec.ServiceName, req.Purpose, actor, capRec.Threshold, capRec.TotalShares, ttl)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	_, _ = s.ledger.Record(r.Context(), "ceremony_initiated", actor, sess.ID, map[string]interface{}{
-		"capsule_id":   capRec.ID,
-		"purpose":      req.Purpose,
-		"threshold":    capRec.Threshold,
-		"total_shares": capRec.TotalShares,
-		"expires_at":   sess.ExpiresAt,
-	})
-
-	writeJSON(w, http.StatusOK, sess)
-}
-
-// 22. Submit Custodian Share to Ceremony
-type ceremonySubmitRequest struct {
-	SessionID     string `json:"session_id"`
-	CustodianName string `json:"custodian_name"`
-	Share         string `json:"share"`
-}
-
-func (s *Server) handleCeremonySubmit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	var req ceremonySubmitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.Share == "" {
-		writeError(w, http.StatusBadRequest, "SessionID and Share are required")
-		return
-	}
-	if req.CustodianName == "" {
-		req.CustodianName = "Anonymous Custodian"
-	}
-
-	sess, err := s.ceremonies.SubmitShare(req.SessionID, req.CustodianName, req.Share)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	_, _ = s.ledger.Record(r.Context(), "custodian_share_submitted", s.actor(r), req.SessionID, map[string]interface{}{
-		"claimed_custodian_name": req.CustodianName,
-		"submitted_count":        sess.SubmittedCount,
-		"quorum_reached":         sess.Status == ceremony.StatusQuorumReached,
-	})
-
-	writeJSON(w, http.StatusOK, sess)
-}
-
-// 23. Execute Quorum Ceremony Drill / Restore
-type ceremonyExecRequest struct {
-	SessionID string `json:"session_id"`
-}
-
-func (s *Server) handleCeremonyExecute(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
-	var req ceremonyExecRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "SessionID is required")
-		return
-	}
-
-	sess, err := s.ceremonies.GetSession(req.SessionID)
-	if err != nil || sess == nil {
-		writeError(w, http.StatusNotFound, "Ceremony not found")
-		return
-	}
-
-	if sess.Status != ceremony.StatusQuorumReached {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Ceremony status is %s (quorum not reached)", sess.Status))
-		return
-	}
-
-	// Reconstruct master key from ephemeral in-memory shares
-	key, err := s.ceremonies.GetReconstructedKey(req.SessionID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed reconstructing key: %v", err))
-		return
-	}
-
-	capRec, err := s.db.GetCapsule(r.Context(), sess.CapsuleID)
-	if err != nil || capRec == nil {
-		writeError(w, http.StatusNotFound, "Target capsule not found on disk")
-		return
-	}
-
-	// Execute isolated verification drill
-	drillSummary, err := s.runner.Execute(r.Context(), drill.DrillParams{
-		CapsuleID:   capRec.ID,
-		CapsulePath: capRec.FilePath,
-		MasterKey:   key,
-		Actor:       fmt.Sprintf("Quorum-Ceremony (%s)", sess.ID),
-	})
-
-	// Cryptographically wipe in-memory shares and close session
-	_ = s.ceremonies.CompleteSession(req.SessionID)
-
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Drill execution failed: %v", err))
-		return
-	}
-
-	_, _ = s.ledger.Record(r.Context(), "ceremony_executed", sess.Initiator, sess.ID, map[string]interface{}{
-		"capsule_id":   sess.CapsuleID,
-		"drill_passed": drillSummary.Passed,
-		"duration_ms":  drillSummary.DurationMs,
-	})
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "executed",
-		"drill_summary": drillSummary,
-	})
-}
-
-// 24. Cancel Ceremony
-func (s *Server) handleCeremonyCancel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-	var req ceremonyExecRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "SessionID is required")
-		return
-	}
-	if err := s.ceremonies.CancelSession(req.SessionID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	_, _ = s.ledger.Record(r.Context(), "ceremony_cancelled", s.actor(r), req.SessionID, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
 // 25. Replication Targets List / Create
@@ -1809,12 +1278,17 @@ func (s *Server) handleCapsuleTimeline(w http.ResponseWriter, r *http.Request) {
 // Start runs the HTTP listener until context cancellation.
 func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.cfg.Port)
+	// No server-wide ReadTimeout or WriteTimeout: a deposit or a download may legitimately
+	// move up to capsule.MaxContainerBytes, which no fixed clock can size. Headers still get
+	// one, and the two capsule routes set their own budget per request (see setDeadline).
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      s,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:              addr,
+		Handler:           s,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
+
+	go s.runIntegritySweep(ctx)
 
 	errChan := make(chan error, 1)
 	go func() {
@@ -1835,7 +1309,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// Close releases background workers owned by the server. It is safe to call twice.
-func (s *Server) Close() {
-	s.ceremonies.Close()
-}
+// Close releases background workers owned by the server. Nothing owns one today —
+// the ceremony manager that did is gone — but Start still calls it on shutdown, so
+// the hook stays rather than being reintroduced by whatever acquires one next.
+func (s *Server) Close() {}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Recovery key ceremony</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <link rel="stylesheet" href="/static/css/ceremony.css">
+  <meta http-equiv="Cache-Control" content="no-store">
+</head>
+<body>
+<main class="ceremony">
+  <h1>Recovery key ceremony</h1>
+  <div class="panel">
+    <p><strong>Read before you begin.</strong> This tab will generate the suite's recovery private key and split it into custodian cards. The key exists only in this tab's memory and cannot be erased before the tab closes. Run this in a <strong>fresh private window</strong>, with <strong>no browser extensions</strong>, on a machine that will <strong>not hibernate</strong> during the ceremony. Print the cards, confirm the import, then <strong>close the tab</strong>. Nothing but the public key leaves this page.</p>
+  </div>
+  <form id="ceremony-form" class="panel">
+    <label class="form-label">Custodians needed to recover (k) <input id="k" class="form-input" type="number" min="2" max="255" value="3" required></label>
+    <label class="form-label">Cards to print (n) <input id="n" class="form-input" type="number" min="2" max="255" value="5" required></label>
+    <button class="btn btn-primary" type="submit">Generate and split</button>
+  </form>
+  <section id="cards" hidden>
+    <div class="panel no-print">
+      <p>Key ID <code id="key-id"></code></p>
+      <button class="btn btn-secondary" id="print-btn">Print cards</button>
+      <button class="btn btn-primary" id="import-btn">Import public key into kyrecovery</button>
+      <p id="import-status"></p>
+    </div>
+    <div id="card-list"></div>
+  </section>
+  <p id="error" class="status-pill" hidden></p>
+</main>
+<script src="/static/wasm/wasm_exec.js"></script>
+<script src="/static/js/ceremony.js"></script>
+</body>
+</html>

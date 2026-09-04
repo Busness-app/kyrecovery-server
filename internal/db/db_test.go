@@ -57,30 +57,62 @@ func TestDatabaseOperations(t *testing.T) {
 	if err != nil || len(custodians) != 1 {
 		t.Fatalf("ListCustodians failed: %v, count=%d", err, len(custodians))
 	}
+}
 
-	// 3. Insert & List Drills
-	drill := db.DrillRecord{
-		ID:           "drill-001",
-		CapsuleID:    "cap-001",
-		ServiceName:  "kysignon",
-		Status:       "passed",
-		DurationMs:   145,
-		MissingDeps:  []string{},
-		ErrorMessage: "",
-		DetailsJSON:  `{"checks": 5}`,
-		StartedAt:    time.Now().UTC().Add(-time.Second),
-		CompletedAt:  time.Now().UTC(),
+// InsertCapsule must classify a primary-key collision as ErrCapsuleExists so callers
+// can distinguish "already stored" from any other insert failure.
+func TestInsertCapsuleReportsDuplicateID(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
 	}
-	if err := database.InsertDrill(ctx, drill); err != nil {
-		t.Fatalf("InsertDrill failed: %v", err)
+	defer database.Close()
+
+	rec := db.CapsuleRecord{
+		ID: "cap-dup", ServiceName: "kysignon", FilePath: "/tmp/cap-dup.kycap",
+		SizeBytes: 1, PayloadHash: "h", Threshold: 2, TotalShares: 3,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	if err := database.InsertCapsule(ctx, rec); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if err := database.InsertCapsule(ctx, rec); err != db.ErrCapsuleExists {
+		t.Fatalf("second insert: got %v, want ErrCapsuleExists", err)
+	}
+}
+
+// publishCapsule's rollback runs DeleteCapsule on context.WithoutCancel(ctx) so a client
+// that disconnects mid-request cannot leave a row with no file. Confirms the mechanism this
+// depends on: the sqlite driver fails a query against an already-canceled context, and
+// context.WithoutCancel is what lets the rollback still run.
+func TestDeleteCapsuleSurvivesACanceledContext(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer database.Close()
+
+	rec := db.CapsuleRecord{
+		ID: "cap-cancel", ServiceName: "kysignon", FilePath: "/tmp/cap-cancel.kycap",
+		SizeBytes: 1, PayloadHash: "h", Threshold: 2, TotalShares: 3,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	if err := database.InsertCapsule(context.Background(), rec); err != nil {
+		t.Fatalf("insert: %v", err)
 	}
 
-	lastDrill, err := database.GetLastDrill(ctx)
-	if err != nil || lastDrill == nil {
-		t.Fatalf("GetLastDrill failed: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := database.DeleteCapsule(ctx, rec.ID); err == nil {
+		t.Fatal("expected the canceled context itself to fail the query")
 	}
-	if lastDrill.Status != "passed" || lastDrill.DurationMs != 145 {
-		t.Fatalf("last drill data mismatch: %+v", lastDrill)
+	if err := database.DeleteCapsule(context.WithoutCancel(ctx), rec.ID); err != nil {
+		t.Fatalf("DeleteCapsule on context.WithoutCancel: %v", err)
+	}
+	if got, err := database.GetCapsule(context.Background(), rec.ID); err != nil || got != nil {
+		t.Fatalf("row still present after rollback: %+v, err=%v", got, err)
 	}
 }
 
@@ -116,7 +148,7 @@ func TestClaimPairingCodeIsSingleUseUnderRace(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			<-start
-			_, err := database.ClaimPairingCode(ctx, "424242", "kynotes", fmt.Sprintf("claimer-%d", n))
+			_, err := database.ClaimPairingCode(ctx, "424242", "kynotes", fmt.Sprintf("claimer-%d", n), "key-test")
 			results <- err
 		}(i)
 	}

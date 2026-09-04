@@ -10,6 +10,22 @@ import (
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
+func TestPasswordRoundTrip(t *testing.T) {
+	hash, err := auth.HashPassword("correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("HashPassword failed: %v", err)
+	}
+	if !auth.VerifyPassword("correct-horse-battery-staple", hash) {
+		t.Fatalf("VerifyPassword rejected the password it was hashed from")
+	}
+	if auth.VerifyPassword("wrong-password", hash) {
+		t.Fatalf("VerifyPassword accepted the wrong password")
+	}
+	if auth.VerifyPassword("correct-horse-battery-staple", "not a phc string") {
+		t.Fatalf("VerifyPassword accepted a malformed stored hash")
+	}
+}
+
 func TestPKCEGeneration(t *testing.T) {
 	verifier, challenge, err := auth.GeneratePKCE()
 	if err != nil {

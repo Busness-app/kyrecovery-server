@@ -8,18 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
-	"golang.org/x/crypto/argon2"
 )
 
 const (
-	// Argon2id parameters recommended for key derivation
-	ArgonTime    = 3
-	ArgonMemory  = 64 * 1024 // 64 MB
-	ArgonThreads = 4
-	KeyLength    = 32 // 256-bit AES key
-	SaltLength   = 16
-	NonceLength  = 12 // Standard GCM nonce length
+	KeyLength   = 32 // 256-bit AES key
+	NonceLength = 12 // Standard GCM nonce length
 )
 
 // GenerateRandomBytes returns cryptographically secure random bytes of length n.
@@ -29,23 +22,6 @@ func GenerateRandomBytes(n int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 	return b, nil
-}
-
-// GenerateMasterKey generates a new 256-bit AES encryption key.
-func GenerateMasterKey() ([]byte, error) {
-	return GenerateRandomBytes(KeyLength)
-}
-
-// DeriveKeyFromPassphrase derives a 256-bit key from a passphrase and salt using Argon2id.
-func DeriveKeyFromPassphrase(passphrase string, salt []byte) ([]byte, error) {
-	if len(passphrase) == 0 {
-		return nil, errors.New("passphrase cannot be empty")
-	}
-	if len(salt) == 0 {
-		return nil, errors.New("salt cannot be empty")
-	}
-	key := argon2.IDKey([]byte(passphrase), salt, ArgonTime, ArgonMemory, ArgonThreads, KeyLength)
-	return key, nil
 }
 
 // EncryptAESGCM encrypts plaintext with the given 256-bit key and returns (ciphertext, nonce, error).

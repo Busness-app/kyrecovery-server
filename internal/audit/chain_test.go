@@ -1,0 +1,97 @@
+package audit_test
+
+import (
+	"testing"
+
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+)
+
+func TestLedgerVerifiesAndDetectsTruncation(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	l := audit.NewLedger(database)
+	for i := 0; i < 3; i++ {
+		if _, err := l.Record(t.Context(), "capsule_deposited", "paired-app:x", "cap-1", map[string]interface{}{"i": i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	anchor, err := l.Verify(t.Context())
+	if err != nil || anchor.Count != 3 {
+		t.Fatalf("verify: %v %+v", err, anchor)
+	}
+	// Remove the tail: the remaining chain still links, only the anchor knows.
+	if err := database.DeleteAuditEventForTest(t.Context(), 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Verify(t.Context()); err == nil {
+		t.Fatal("truncated log verified")
+	}
+	// A fresh ledger over the same store resumes from the anchor and refuses to append onto
+	// a log that no longer matches it.
+	l2 := audit.NewLedger(database)
+	if _, err := l2.Record(t.Context(), "x", "y", "z", nil); err == nil {
+		t.Fatal("append succeeded on a chain that fails its anchor")
+	}
+}
+
+// Verify walks the log while the server keeps recording. Reading the anchor and the
+// rows without the ledger lock made a healthy chain look one record too long.
+func TestVerifyIsSafeAlongsideConcurrentRecords(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	l := audit.NewLedger(database)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			if _, err := l.Record(t.Context(), "capsule_deposited", "paired-app:x", "cap-1", nil); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for {
+		if _, err := l.Verify(t.Context()); err != nil {
+			t.Fatalf("verify raced an append: %v", err)
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+}
+
+// Removing the anchor is the one deletion the anchor cannot catch, so the log has to.
+// Events without an anchor must latch the ledger, not start a fresh chain over them.
+func TestEventsWithoutAnAnchorLatchTheLedger(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	l := audit.NewLedger(database)
+	for i := 0; i < 3; i++ {
+		if _, err := l.Record(t.Context(), "capsule_deposited", "paired-app:x", "cap-1", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.DeleteAuditAnchorForTest(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	l2 := audit.NewLedger(database)
+	if l2.Healthy() == nil {
+		t.Fatal("a log with events but no anchor reports healthy")
+	}
+	if _, err := l2.Record(t.Context(), "x", "y", "z", nil); err == nil {
+		t.Fatal("append succeeded over an anchorless log")
+	}
+}

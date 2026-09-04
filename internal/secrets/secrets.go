@@ -7,18 +7,16 @@
 package secrets
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/Busness-app/ky-primitives/keyfile"
 	"golang.org/x/crypto/hkdf"
-
-	"crypto/sha256"
 
 	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
@@ -31,10 +29,6 @@ const KeyFileName = "secret.key"
 
 const sealedPrefix = "enc:v1:"
 
-// KeyedMarkerName records that the audit ledger has been re-keyed, so unkeyed
-// event hashes are never accepted again.
-const KeyedMarkerName = "ledger.keyed"
-
 // Keyring derives purpose-specific keys from a single 256-bit server key.
 type Keyring struct {
 	master []byte
@@ -44,94 +38,29 @@ type Keyring struct {
 // Load returns the keyring for dataDir, creating a new key file on first run.
 // An empty dataDir yields an ephemeral key (in-memory databases only).
 func Load(dataDir string) (*Keyring, error) {
-	if env := strings.TrimSpace(os.Getenv(EnvKey)); env != "" {
-		key, err := decodeKey(env)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", EnvKey, err)
-		}
+	if key, ok, err := keyfile.FromEnv(EnvKey, crypto.KeyLength); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvKey, err)
+	} else if ok {
 		return &Keyring{master: key, dir: dataDir}, nil
 	}
 	if dataDir == "" {
 		return Ephemeral()
 	}
 
-	path := filepath.Join(dataDir, KeyFileName)
-	raw, err := os.ReadFile(path)
-	if err == nil {
-		key, err := decodeKey(strings.TrimSpace(string(raw)))
-		if err != nil {
-			return nil, fmt.Errorf("invalid key file %s: %w", path, err)
-		}
-		return &Keyring{master: key, dir: dataDir}, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("failed reading key file %s: %w", path, err)
-	}
-
-	key, err := crypto.GenerateMasterKey()
+	key, err := keyfile.LoadOrCreate(filepath.Join(dataDir, KeyFileName), crypto.KeyLength)
 	if err != nil {
-		return nil, err
-	}
-	if err := writeNewKeyFile(path, key); err != nil {
 		return nil, err
 	}
 	return &Keyring{master: key, dir: dataDir}, nil
 }
 
-// LedgerKeyed reports whether the audit ledger is known to be fully keyed. A
-// keyring with nowhere to persist state (an in-memory database) is treated as
-// keyed: there is no pre-existing chain to migrate.
-func (k *Keyring) LedgerKeyed() bool {
-	if k.dir == "" {
-		return true
-	}
-	_, err := os.Stat(filepath.Join(k.dir, KeyedMarkerName))
-	return err == nil
-}
-
-// MarkLedgerKeyed records, outside the database, that every audit event is
-// authenticated with the ledger key.
-func (k *Keyring) MarkLedgerKeyed() error {
-	if k.dir == "" {
-		return nil
-	}
-	path := filepath.Join(k.dir, KeyedMarkerName)
-	if err := os.WriteFile(path, []byte("1\n"), 0600); err != nil {
-		return fmt.Errorf("failed marking ledger as keyed: %w", err)
-	}
-	return nil
-}
-
 // Ephemeral returns a keyring backed by a random key that is never persisted.
 func Ephemeral() (*Keyring, error) {
-	key, err := crypto.GenerateMasterKey()
+	key, err := crypto.GenerateRandomBytes(crypto.KeyLength)
 	if err != nil {
 		return nil, err
 	}
 	return &Keyring{master: key}, nil
-}
-
-// writeNewKeyFile creates path exclusively so a concurrent starter cannot lose its key.
-func writeNewKeyFile(path string, key []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("failed creating key file %s: %w", path, err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
-		return fmt.Errorf("failed writing key file %s: %w", path, err)
-	}
-	return f.Sync()
-}
-
-func decodeKey(s string) ([]byte, error) {
-	if key, err := hex.DecodeString(s); err == nil && len(key) == crypto.KeyLength {
-		return key, nil
-	}
-	if key, err := base64.StdEncoding.DecodeString(s); err == nil && len(key) == crypto.KeyLength {
-		return key, nil
-	}
-	return nil, fmt.Errorf("expected %d bytes as hex or base64", crypto.KeyLength)
 }
 
 func (k *Keyring) derive(info string) []byte {
@@ -160,11 +89,16 @@ func (k *Keyring) Seal(plaintext string) (string, error) {
 	return sealedPrefix + base64.StdEncoding.EncodeToString(append(nonce, ct...)), nil
 }
 
-// Open decrypts a value produced by Seal. Values written before encryption existed
-// are returned unchanged so upgrades do not lose credentials.
+// Open decrypts a value produced by Seal. A stored value that is not a sealed envelope is
+// an error, not a credential: returning it unchanged would let anyone who can write the
+// database choose a plaintext secret the server then uses as if it had sealed it itself.
+// Empty is not a value and stays empty.
 func (k *Keyring) Open(stored string) (string, error) {
+	if stored == "" {
+		return "", nil
+	}
 	if !IsSealed(stored) {
-		return stored, nil
+		return "", errors.New("stored secret is not sealed")
 	}
 	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, sealedPrefix))
 	if err != nil || len(blob) <= crypto.NonceLength {

@@ -1,5 +1,5 @@
 # Multi-stage build for kyrecovery-server
-FROM golang:alpine AS builder
+FROM golang:1.26.6-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -25,4 +25,7 @@ USER kyrecovery
 EXPOSE 8095
 VOLUME ["/app/data"]
 
-ENTRYPOINT ["/app/kyrecovery", "serve", "--port", "8095", "--data-dir", "/app/data"]
+# serve is the default, not the only command: `docker run <image> audit` and
+# `docker run <image> help` have to reach the CLI, so the subcommand is CMD.
+ENTRYPOINT ["/app/kyrecovery"]
+CMD ["serve", "--port", "8095", "--data-dir", "/app/data"]

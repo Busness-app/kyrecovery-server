@@ -1,0 +1,193 @@
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
+)
+
+// handleDeposit stores a sealed container. It reads the manifest without a key, decides on
+// exactly two of its fields — the recovery key ID against the pin and the service name
+// against the paired app — and records the rest as the sealer attested it.
+func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	authHeader := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == "" || authHeader == token {
+		writeError(w, http.StatusUnauthorized, "Missing or invalid Bearer authorization token")
+		return
+	}
+	ctx := r.Context()
+	app, err := s.db.GetPairedAppByToken(ctx, token)
+	if err != nil || app == nil {
+		writeError(w, http.StatusUnauthorized, "Invalid or revoked API token")
+		return
+	}
+	now := time.Now()
+	pushKey := "push:" + app.ID
+	if s.pushLimit.exceeded(pushKey, pushesPerToken, now) {
+		writeError(w, http.StatusTooManyRequests, "Deposit rate limit exceeded for this paired product")
+		return
+	}
+	s.pushLimit.record(pushKey, now)
+	select {
+	case s.pushSlots <- struct{}{}:
+		defer func() { <-s.pushSlots }()
+	case <-ctx.Done():
+		writeError(w, http.StatusServiceUnavailable, "Server busy; retry shortly")
+		return
+	}
+
+	// A blind store's audit trail is most of its evidence that a deposit happened.
+	// If the ledger cannot append, the deposit is refused rather than recorded nowhere.
+	if err := s.ledger.Healthy(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Audit ledger is not writable; deposits refused until an operator repairs it")
+		return
+	}
+
+	// A whole container may be on the wire; give the read its own budget rather than
+	// letting a header-sized timeout truncate it into a bogus 400.
+	setReadDeadline(w, capsuleTransferBudget)
+	raw, err := io.ReadAll(r.Body) // MaxBytesReader in ServeHTTP caps this at capsule.MaxContainerBytes
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Container exceeds %d bytes", capsule.MaxContainerBytes))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "Failed reading request body")
+		return
+	}
+	m, err := capsule.ReadUnverifiedManifest(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Body is not a kycap/3 container")
+		return
+	}
+	key, err := s.db.GetRecoveryKey(ctx)
+	if err != nil || key == nil {
+		writeError(w, http.StatusConflict, "No recovery key imported")
+		return
+	}
+	if m.RecoveryKeyID != key.KeyID {
+		writeError(w, http.StatusConflict, fmt.Sprintf("capsule is sealed to recovery key %s; this store pins %s", m.RecoveryKeyID, key.KeyID))
+		return
+	}
+	if m.ServiceName != app.ServiceName {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("capsule names service %q; this token is paired for %q", m.ServiceName, app.ServiceName))
+		return
+	}
+	// The capsule ID becomes a filename, so it is held to an allowlist rather than a
+	// denylist of separators.
+	if !validCapsuleID(m.CapsuleID) || !validServiceName(m.ServiceName) {
+		writeError(w, http.StatusBadRequest, "Manifest capsule_id or service_name is not a usable name")
+		return
+	}
+
+	sum := sha256.Sum256(raw)
+	digest := hex.EncodeToString(sum[:])
+
+	// From here to the response this ID is ours: a retry of the same deposit waits and
+	// then finds a whole one, never a row whose file is still on its way.
+	defer s.idLocks.acquire(m.CapsuleID)()
+
+	// Fast path only. The row claimed by publishCapsule below is what actually decides.
+	existing, err := s.db.GetCapsule(ctx, m.CapsuleID)
+	if err != nil {
+		log.Printf("deposit: reading capsule %s: %v", m.CapsuleID, err)
+		writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
+		return
+	}
+	if existing != nil {
+		s.respondToDuplicate(ctx, w, existing, digest)
+		return
+	}
+
+	rec := db.CapsuleRecord{
+		ID: m.CapsuleID, ServiceName: m.ServiceName, AppName: app.AppName, AppVersion: m.AppVersion,
+		FilePath: s.capsulePath(m.CapsuleID), SizeBytes: int64(len(raw)), Digest: digest,
+		PayloadHash: m.PayloadHash, Threshold: m.Threshold, TotalShares: m.TotalShares,
+		RecoveryKeyID: m.RecoveryKeyID, EncapsulatedKey: m.EncapsulatedKey,
+		CreatedAt: m.CreatedAt, DepositedAt: now.UTC(), PairedAppID: app.ID, Status: "active",
+	}
+	record := func(ctx context.Context) error {
+		_, err := s.ledger.Record(ctx, "capsule_deposited", "paired-app:"+app.ID, rec.ID, map[string]interface{}{
+			"service_name": rec.ServiceName, "digest": digest, "size_bytes": rec.SizeBytes, "recovery_key_id": rec.RecoveryKeyID,
+		})
+		return err
+	}
+	if err := s.publishCapsule(ctx, rec, raw, record); err != nil {
+		if errors.Is(err, db.ErrCapsuleExists) {
+			// A concurrent deposit of the same ID won the row. Re-read it and answer as if
+			// the pre-check had seen it.
+			stored, getErr := s.db.GetCapsule(ctx, rec.ID)
+			if getErr != nil || stored == nil {
+				log.Printf("deposit: re-reading capsule %s after a lost race: %v", rec.ID, getErr)
+				writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
+				return
+			}
+			s.respondToDuplicate(ctx, w, stored, digest)
+			return
+		}
+		log.Printf("deposit: publishing capsule %s: %v", rec.ID, err)
+		switch {
+		case errors.Is(err, errDepositUnrecorded):
+			writeError(w, http.StatusServiceUnavailable, "Failed recording the deposit in the audit chain; deposit refused")
+		case errors.Is(err, errCapsuleFileExists):
+			writeError(w, http.StatusConflict, "A capsule file with this ID already exists")
+		default:
+			writeError(w, http.StatusInternalServerError, "Failed storing capsule")
+		}
+		return
+	}
+	_ = s.db.UpdateAppLastBackup(ctx, app.ID)
+	go s.replication.SyncAllAutoTargets(context.Background(), rec.ID)
+	writeJSON(w, http.StatusCreated, depositResponse(&rec))
+}
+
+// respondToDuplicate answers a deposit whose ID is already stored: identical bytes are the
+// idempotent retry the products actually make, anything else is a collision. A row whose file
+// is absent is a crash-orphaned insert (the rename never happened, or the file was lost after);
+// it is marked corrupt and refused so the product retries with a new ID instead of believing
+// the deposit already exists.
+//
+// As in verifyCapsule, only absence is evidence: any other stat failure is a fact about the
+// disk, not about the capsule, so the row is left alone and the deposit gets a 500.
+func (s *Server) respondToDuplicate(ctx context.Context, w http.ResponseWriter, stored *db.CapsuleRecord, digest string) {
+	if _, err := os.Stat(stored.FilePath); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("deposit: stat of capsule %s: %v", stored.ID, err)
+			writeError(w, http.StatusInternalServerError, "Failed reading the stored capsule file")
+			return
+		}
+		if setErr := s.db.SetCapsuleStatus(ctx, stored.ID, "corrupt"); setErr != nil {
+			log.Printf("deposit: marking capsule %s corrupt: %v", stored.ID, setErr)
+		}
+		log.Printf("deposit: capsule %s has a row but no file on disk", stored.ID)
+		writeError(w, http.StatusConflict, "A capsule with this ID is recorded but its file is missing")
+		return
+	}
+	if stored.Digest == digest {
+		writeJSON(w, http.StatusOK, depositResponse(stored))
+		return
+	}
+	writeError(w, http.StatusConflict, "A different capsule with this ID is already stored")
+}
+
+func depositResponse(rec *db.CapsuleRecord) map[string]any {
+	return map[string]any{"capsule_id": rec.ID, "digest": rec.Digest, "size_bytes": rec.SizeBytes, "deposited_at": rec.DepositedAt}
+}
