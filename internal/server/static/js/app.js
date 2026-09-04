@@ -687,6 +687,16 @@ function applyReplicationPreset() {
   label('repl-access-key-label', preset === 'sftp' || preset === 'smb' ? 'Username' : 'Access Key ID');
   label('repl-secret-key-label', preset === 'sftp' ? 'Password or PEM Private Key' : preset === 'smb' ? 'Password' : 'Secret Access Key');
   label('repl-prefix-label', preset === 'sftp' || preset === 'smb' ? 'Remote Directory' : 'Prefix / Subdirectory');
+  // The field is prefilled with capsules/, which would override a directory
+  // pasted in an SMB path; leave it blank there and say where it comes from.
+  const prefixInput = document.getElementById('repl-prefix');
+  if (preset === 'smb') {
+    if (prefixInput.value === 'capsules/') prefixInput.value = '';
+    prefixInput.placeholder = 'from the host path, or a directory in the share';
+  } else {
+    if (prefixInput.value === '') prefixInput.value = 'capsules/';
+    prefixInput.placeholder = 'capsules/';
+  }
 
   if (preset === 'local') {
     s3Fields.style.display = 'none';
@@ -730,7 +740,8 @@ function getReplicationTargetPayload() {
     region: document.getElementById('repl-region') ? document.getElementById('repl-region').value.trim() : 'us-east-1',
     access_key: document.getElementById('repl-access-key') ? document.getElementById('repl-access-key').value.trim() : '',
     secret_key: document.getElementById('repl-secret-key') ? document.getElementById('repl-secret-key').value.trim() : '',
-    prefix: document.getElementById('repl-prefix').value.trim() || 'capsules/',
+    // For SMB a blank directory lets a pasted //host/share/dir supply it.
+    prefix: document.getElementById('repl-prefix').value.trim() || (type === 'smb' ? '' : 'capsules/'),
     host_key: document.getElementById('repl-host-key').value.trim(),
     auto_sync: document.getElementById('repl-auto-sync').checked
   };

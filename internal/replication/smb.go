@@ -38,6 +38,12 @@ func ParseSMBEndpoint(endpoint, share, dir string) (addr, outShare, outDir strin
 		addr = addr[6:]
 	}
 	addr = strings.TrimLeft(addr, "/")
+	// Before any split: a password may itself contain "/" or "\", and the
+	// endpoint column is cleartext. A share named with "@" loses out; the
+	// message says where the user and password belong.
+	if strings.Contains(addr, "@") {
+		return "", "", "", fmt.Errorf("SMB host %q carries a username or password; put the user in the username field and the password in the password field", endpoint)
+	}
 	if host, rest, ok := strings.Cut(addr, "/"); ok {
 		addr = host
 		pathShare, pathDir, _ := strings.Cut(strings.Trim(rest, "/"), "/")
@@ -47,9 +53,6 @@ func ParseSMBEndpoint(endpoint, share, dir string) (addr, outShare, outDir strin
 		if dir == "" {
 			dir = pathDir
 		}
-	}
-	if strings.Contains(addr, "@") {
-		return "", "", "", fmt.Errorf("SMB host %q carries a username or password; put the user in the username field and the password in the password field", addr)
 	}
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, "445")
