@@ -109,7 +109,7 @@ header {
 }
 .status-pill.ready   { color: var(--ok);   background: var(--ok-wash);   border-color: rgba(111, 191, 138, 0.3); }
 .status-pill.warning { color: var(--warn); background: var(--warn-wash); border-color: rgba(216, 166, 87, 0.3); }
-.status-pill.danger  { color: var(--bad);  background: var(--bad-wash);  border-color: rgba(217, 117, 106, 0.3); }
+.status-pill.danger  { color: var(--bad);  background: var(--bad-wash);  border-color: rgba(235, 157, 147, 0.3); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
 
 /* Tabs */
@@ -179,7 +179,7 @@ main { flex: 1; width: 100%; max-width: 1100px; margin: 0 auto; padding: 32px; }
 .btn-primary:hover { background: #d9b23a; }
 .btn-secondary { background: transparent; color: var(--paper); border-color: var(--rule-strong); }
 .btn-secondary:hover { border-color: var(--paper-muted); }
-.btn-danger { background: transparent; color: var(--bad); border-color: rgba(217, 117, 106, 0.4); }
+.btn-danger { background: transparent; color: var(--bad); border-color: rgba(235, 157, 147, 0.4); }
 .btn-danger:hover { background: var(--bad-wash); }
 .btn-sm { padding: 5px 10px; font-size: 13px; }
 .btn[disabled] { opacity: 0.55; cursor: default; }
