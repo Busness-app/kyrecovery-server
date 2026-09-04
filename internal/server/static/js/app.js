@@ -698,8 +698,8 @@ function applyReplicationPreset() {
     endpointInput.placeholder = 'nas.lan:22';
   } else if (preset === 'smb') {
     s3Fields.style.display = 'block';
-    endpointLabel.textContent = 'SMB Host (host or host:port)';
-    endpointInput.placeholder = 'nas.lan';
+    endpointLabel.textContent = 'SMB Host (host, host:port, or //host/share/dir)';
+    endpointInput.placeholder = 'nas.lan  or  //nas.lan/backups/kyrecovery';
     document.getElementById('repl-bucket').placeholder = 'backups';
     document.getElementById('repl-access-key').placeholder = 'user or DOMAIN\\user';
   } else {

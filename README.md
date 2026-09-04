@@ -96,8 +96,10 @@ here. Target types:
   server's host key is pinned: Test Connection reports the SHA256 fingerprint
   of an unknown server, the operator confirms it against `ssh-keygen -lf` and
   saves it, and a later mismatch refuses to connect. No pin, no connection.
-- `smb`: a Windows or Samba share over SMB 2 or 3, never SMB1. The user may be
-  `DOMAIN\user`. The client requires message signing. Known limitation: the
+- `smb`: a Windows or Samba share over SMB 2 or 3, never SMB1. The host may be
+  given as `host`, `host:port`, `\\host\share\dir`, `//host/share/dir` or
+  `smb://host/share/dir`; a share or directory in the path fills in whichever
+  field was left blank. The user may be `DOMAIN\user`. The client requires message signing. Known limitation: the
   SMB library accepts a server that grants a *guest* session, unsigned, so a
   host impersonating the share can swallow uploads while the sync log records
   success and can observe the NTLMv2 exchange. Give the target a strong

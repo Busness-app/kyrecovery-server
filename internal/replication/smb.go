@@ -26,7 +26,23 @@ type SMBClient struct {
 	Timeout time.Duration // whole-operation budget; zero means defaultTransferBudget
 }
 
+// NewSMBClient accepts the address as a bare host, host:port, or the forms an
+// operator copies from a file manager: \\host\share\dir, //host/share/dir or
+// smb://host/share/dir. A share or directory given in the path fills in
+// whichever of share and dir was left blank.
 func NewSMBClient(addr, share, user, secret, dir string) *SMBClient {
+	addr = strings.TrimPrefix(strings.ReplaceAll(addr, "\\", "/"), "smb://")
+	addr = strings.TrimLeft(addr, "/")
+	if host, rest, ok := strings.Cut(addr, "/"); ok {
+		addr = host
+		pathShare, pathDir, _ := strings.Cut(strings.Trim(rest, "/"), "/")
+		if share == "" {
+			share = pathShare
+		}
+		if dir == "" {
+			dir = pathDir
+		}
+	}
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, "445")
 	}

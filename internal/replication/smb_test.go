@@ -98,3 +98,28 @@ func TestSMBStalledServerReturnsWithinBudget(t *testing.T) {
 		t.Fatalf("took %s, budget was 2s", time.Since(start))
 	}
 }
+
+// Operators paste what their file manager shows. Every form must land on the
+// same host, share and directory.
+func TestNewSMBClientAcceptsUNCAndURLForms(t *testing.T) {
+	cases := []struct {
+		endpoint, share, dir string
+	}{
+		{"nas.lan", "Public", "capsules"},
+		{"nas.lan:1445", "Public", "capsules"},
+		{"//nas.lan/Public/", "", "capsules"},
+		{`\\nas.lan\Public\capsules`, "", ""},
+		{"smb://nas.lan/Public/capsules/", "", ""},
+		{"smb://nas.lan:1445/Public", "", "capsules"},
+	}
+	for _, c := range cases {
+		got := replication.NewSMBClient(c.endpoint, c.share, "ky", "pw", c.dir)
+		wantAddr := "nas.lan:445"
+		if strings.Contains(c.endpoint, "1445") {
+			wantAddr = "nas.lan:1445"
+		}
+		if got.Addr != wantAddr || got.Share != "Public" || got.Dir != "capsules" {
+			t.Errorf("%q share=%q dir=%q -> addr=%q share=%q dir=%q", c.endpoint, c.share, c.dir, got.Addr, got.Share, got.Dir)
+		}
+	}
+}
