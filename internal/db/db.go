@@ -16,17 +16,26 @@ import (
 	"github.com/Busness-app/kyrecovery-server/internal/secrets"
 )
 
-// CapsuleRecord stores metadata for a stored capsule.
+// CapsuleRecord stores metadata for a stored capsule. Every field but Digest, FilePath,
+// DepositedAt, PairedAppID and Status is copied from the manifest as the sealer attested
+// it: the store cannot open the container, so it records rather than verifies.
 type CapsuleRecord struct {
-	ID          string    `json:"id"`
-	ServiceName string    `json:"service_name"`
-	FilePath    string    `json:"-"`
-	SizeBytes   int64     `json:"size_bytes"`
-	PayloadHash string    `json:"payload_hash"`
-	Threshold   int       `json:"threshold"`
-	TotalShares int       `json:"total_shares"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	ServiceName     string    `json:"service_name"`
+	AppName         string    `json:"app_name"`
+	AppVersion      string    `json:"app_version"`
+	FilePath        string    `json:"-"`
+	SizeBytes       int64     `json:"size_bytes"`
+	Digest          string    `json:"digest"`       // SHA-256 hex of the container as deposited
+	PayloadHash     string    `json:"payload_hash"` // from the manifest, sealer-attested
+	Threshold       int       `json:"threshold"`
+	TotalShares     int       `json:"total_shares"`
+	RecoveryKeyID   string    `json:"recovery_key_id"`
+	EncapsulatedKey string    `json:"-"`
+	CreatedAt       time.Time `json:"created_at"`   // from the manifest
+	DepositedAt     time.Time `json:"deposited_at"` // kyrecovery's clock
+	PairedAppID     string    `json:"paired_app_id"`
+	Status          string    `json:"status"` // "active" | "corrupt"
 }
 
 // CustodianRecord represents a designated recovery custodian.
@@ -80,6 +89,8 @@ type PairedAppRecord struct {
 	PairedAt     *time.Time `json:"paired_at,omitempty"`
 	LastBackupAt *time.Time `json:"last_backup_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+	// RecoveryKeyID is the key this product was handed at pairing.
+	RecoveryKeyID string `json:"recovery_key_id,omitempty"`
 }
 
 // RecoveryKeyRecord is the suite recovery public key this store hands to products and pins
@@ -222,13 +233,20 @@ func (d *DB) migrate() error {
 	CREATE TABLE IF NOT EXISTS capsules (
 		id TEXT PRIMARY KEY,
 		service_name TEXT NOT NULL,
+		app_name TEXT NOT NULL DEFAULT '',
+		app_version TEXT NOT NULL DEFAULT '',
 		file_path TEXT NOT NULL,
 		size_bytes INTEGER NOT NULL,
+		digest TEXT NOT NULL,
 		payload_hash TEXT NOT NULL,
 		threshold INTEGER NOT NULL,
 		total_shares INTEGER NOT NULL,
-		status TEXT NOT NULL DEFAULT 'active',
-		created_at DATETIME NOT NULL
+		recovery_key_id TEXT NOT NULL,
+		encapsulated_key TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		deposited_at DATETIME NOT NULL,
+		paired_app_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'active'
 	);
 
 	CREATE TABLE IF NOT EXISTS custodians (
@@ -272,6 +290,7 @@ func (d *DB) migrate() error {
 		api_token TEXT NOT NULL UNIQUE,
 		pairing_code TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'pending',
+		recovery_key_id TEXT NOT NULL DEFAULT '',
 		expires_at DATETIME NOT NULL,
 		paired_at DATETIME,
 		last_backup_at DATETIME,
@@ -342,18 +361,20 @@ func (d *DB) migrate() error {
 
 // InsertCapsule saves a new capsule record.
 func (d *DB) InsertCapsule(ctx context.Context, c CapsuleRecord) error {
-	q := `INSERT INTO capsules (id, service_name, file_path, size_bytes, payload_hash, threshold, total_shares, status, created_at)
-	      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.conn.ExecContext(ctx, q, c.ID, c.ServiceName, c.FilePath, c.SizeBytes, c.PayloadHash, c.Threshold, c.TotalShares, c.Status, c.CreatedAt.UTC())
+	q := `INSERT INTO capsules (id, service_name, app_name, app_version, file_path, size_bytes, digest, payload_hash, threshold, total_shares, recovery_key_id, encapsulated_key, created_at, deposited_at, paired_app_id, status)
+	      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.conn.ExecContext(ctx, q, c.ID, c.ServiceName, c.AppName, c.AppVersion, c.FilePath, c.SizeBytes,
+		c.Digest, c.PayloadHash, c.Threshold, c.TotalShares, c.RecoveryKeyID, c.EncapsulatedKey,
+		c.CreatedAt.UTC(), c.DepositedAt.UTC(), c.PairedAppID, c.Status)
 	return err
 }
 
 // GetCapsule retrieves a capsule by ID.
 func (d *DB) GetCapsule(ctx context.Context, id string) (*CapsuleRecord, error) {
-	q := `SELECT id, service_name, file_path, size_bytes, payload_hash, threshold, total_shares, status, created_at FROM capsules WHERE id = ?`
+	q := `SELECT id, service_name, app_name, app_version, file_path, size_bytes, digest, payload_hash, threshold, total_shares, recovery_key_id, encapsulated_key, created_at, deposited_at, paired_app_id, status FROM capsules WHERE id = ?`
 	row := d.conn.QueryRowContext(ctx, q, id)
 	var c CapsuleRecord
-	err := row.Scan(&c.ID, &c.ServiceName, &c.FilePath, &c.SizeBytes, &c.PayloadHash, &c.Threshold, &c.TotalShares, &c.Status, &c.CreatedAt)
+	err := row.Scan(&c.ID, &c.ServiceName, &c.AppName, &c.AppVersion, &c.FilePath, &c.SizeBytes, &c.Digest, &c.PayloadHash, &c.Threshold, &c.TotalShares, &c.RecoveryKeyID, &c.EncapsulatedKey, &c.CreatedAt, &c.DepositedAt, &c.PairedAppID, &c.Status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -365,7 +386,7 @@ func (d *DB) GetCapsule(ctx context.Context, id string) (*CapsuleRecord, error) 
 
 // ListCapsules returns all active capsules.
 func (d *DB) ListCapsules(ctx context.Context) ([]CapsuleRecord, error) {
-	q := `SELECT id, service_name, file_path, size_bytes, payload_hash, threshold, total_shares, status, created_at FROM capsules ORDER BY created_at DESC`
+	q := `SELECT id, service_name, app_name, app_version, file_path, size_bytes, digest, payload_hash, threshold, total_shares, recovery_key_id, encapsulated_key, created_at, deposited_at, paired_app_id, status FROM capsules ORDER BY created_at DESC`
 	rows, err := d.conn.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -375,7 +396,7 @@ func (d *DB) ListCapsules(ctx context.Context) ([]CapsuleRecord, error) {
 	var list []CapsuleRecord
 	for rows.Next() {
 		var c CapsuleRecord
-		if err := rows.Scan(&c.ID, &c.ServiceName, &c.FilePath, &c.SizeBytes, &c.PayloadHash, &c.Threshold, &c.TotalShares, &c.Status, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ServiceName, &c.AppName, &c.AppVersion, &c.FilePath, &c.SizeBytes, &c.Digest, &c.PayloadHash, &c.Threshold, &c.TotalShares, &c.RecoveryKeyID, &c.EncapsulatedKey, &c.CreatedAt, &c.DepositedAt, &c.PairedAppID, &c.Status); err != nil {
 			return nil, err
 		}
 		list = append(list, c)
@@ -519,19 +540,20 @@ func (d *DB) ListAuditEvents(ctx context.Context, limit int) ([]AuditRecord, err
 
 // InsertPairedApp stores a pending pairing code record.
 func (d *DB) InsertPairedApp(ctx context.Context, app PairedAppRecord) error {
-	q := `INSERT INTO paired_apps (id, service_name, app_name, api_token, pairing_code, status, expires_at, created_at)
-	      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.conn.ExecContext(ctx, q, app.ID, app.ServiceName, app.AppName, app.APIToken, app.PairingCode, app.Status, app.ExpiresAt.UTC(), app.CreatedAt.UTC())
+	q := `INSERT INTO paired_apps (id, service_name, app_name, api_token, pairing_code, status, recovery_key_id, expires_at, created_at)
+	      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.conn.ExecContext(ctx, q, app.ID, app.ServiceName, app.AppName, app.APIToken, app.PairingCode, app.Status,
+		app.RecoveryKeyID, app.ExpiresAt.UTC(), app.CreatedAt.UTC())
 	return err
 }
 
 // GetPairedAppByCode finds a pending pairing code.
 func (d *DB) GetPairedAppByCode(ctx context.Context, code string) (*PairedAppRecord, error) {
-	q := `SELECT id, service_name, app_name, api_token, pairing_code, status, expires_at, paired_at, last_backup_at, created_at
+	q := `SELECT id, service_name, app_name, api_token, pairing_code, status, recovery_key_id, expires_at, paired_at, last_backup_at, created_at
 	      FROM paired_apps WHERE pairing_code = ?`
 	row := d.conn.QueryRowContext(ctx, q, code)
 	var a PairedAppRecord
-	err := row.Scan(&a.ID, &a.ServiceName, &a.AppName, &a.APIToken, &a.PairingCode, &a.Status, &a.ExpiresAt, &a.PairedAt, &a.LastBackupAt, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.ServiceName, &a.AppName, &a.APIToken, &a.PairingCode, &a.Status, &a.RecoveryKeyID, &a.ExpiresAt, &a.PairedAt, &a.LastBackupAt, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -543,11 +565,11 @@ func (d *DB) GetPairedAppByCode(ctx context.Context, code string) (*PairedAppRec
 
 // GetPairedAppByToken finds an active paired app by its API bearer token.
 func (d *DB) GetPairedAppByToken(ctx context.Context, token string) (*PairedAppRecord, error) {
-	q := `SELECT id, service_name, app_name, api_token, pairing_code, status, expires_at, paired_at, last_backup_at, created_at
+	q := `SELECT id, service_name, app_name, api_token, pairing_code, status, recovery_key_id, expires_at, paired_at, last_backup_at, created_at
 	      FROM paired_apps WHERE api_token = ? AND status = 'paired'`
 	row := d.conn.QueryRowContext(ctx, q, token)
 	var a PairedAppRecord
-	err := row.Scan(&a.ID, &a.ServiceName, &a.AppName, &a.APIToken, &a.PairingCode, &a.Status, &a.ExpiresAt, &a.PairedAt, &a.LastBackupAt, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.ServiceName, &a.AppName, &a.APIToken, &a.PairingCode, &a.Status, &a.RecoveryKeyID, &a.ExpiresAt, &a.PairedAt, &a.LastBackupAt, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -558,7 +580,7 @@ func (d *DB) GetPairedAppByToken(ctx context.Context, token string) (*PairedAppR
 }
 
 // ClaimPairingCode consumes a pairing code and marks it paired with specific app name/service.
-func (d *DB) ClaimPairingCode(ctx context.Context, code, serviceName, appName string) (*PairedAppRecord, error) {
+func (d *DB) ClaimPairingCode(ctx context.Context, code, serviceName, appName, recoveryKeyID string) (*PairedAppRecord, error) {
 	app, err := d.GetPairedAppByCode(ctx, code)
 	if err != nil {
 		return nil, err
@@ -576,9 +598,9 @@ func (d *DB) ClaimPairingCode(ctx context.Context, code, serviceName, appName st
 	// The status and expiry guards live in the UPDATE so two concurrent claims of the same
 	// code cannot both mint a token; the checks above only shape the error message.
 	now := time.Now().UTC()
-	q := `UPDATE paired_apps SET status = 'paired', service_name = ?, app_name = ?, paired_at = ?
+	q := `UPDATE paired_apps SET status = 'paired', service_name = ?, app_name = ?, paired_at = ?, recovery_key_id = ?
 	      WHERE id = ? AND status = 'pending' AND expires_at > ?`
-	res, err := d.conn.ExecContext(ctx, q, serviceName, appName, now, app.ID, now)
+	res, err := d.conn.ExecContext(ctx, q, serviceName, appName, now, recoveryKeyID, app.ID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -592,6 +614,7 @@ func (d *DB) ClaimPairingCode(ctx context.Context, code, serviceName, appName st
 	app.ServiceName = serviceName
 	app.AppName = appName
 	app.PairedAt = &now
+	app.RecoveryKeyID = recoveryKeyID
 	return app, nil
 }
 
@@ -605,7 +628,7 @@ func (d *DB) UpdateAppLastBackup(ctx context.Context, id string) error {
 
 // ListPairedApps returns all registered and pending paired applications.
 func (d *DB) ListPairedApps(ctx context.Context) ([]PairedAppRecord, error) {
-	q := `SELECT id, service_name, app_name, api_token, pairing_code, status, expires_at, paired_at, last_backup_at, created_at
+	q := `SELECT id, service_name, app_name, api_token, pairing_code, status, recovery_key_id, expires_at, paired_at, last_backup_at, created_at
 	      FROM paired_apps ORDER BY created_at DESC`
 	rows, err := d.conn.QueryContext(ctx, q)
 	if err != nil {
@@ -616,7 +639,7 @@ func (d *DB) ListPairedApps(ctx context.Context) ([]PairedAppRecord, error) {
 	var list []PairedAppRecord
 	for rows.Next() {
 		var a PairedAppRecord
-		if err := rows.Scan(&a.ID, &a.ServiceName, &a.AppName, &a.APIToken, &a.PairingCode, &a.Status, &a.ExpiresAt, &a.PairedAt, &a.LastBackupAt, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ServiceName, &a.AppName, &a.APIToken, &a.PairingCode, &a.Status, &a.RecoveryKeyID, &a.ExpiresAt, &a.PairedAt, &a.LastBackupAt, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, a)

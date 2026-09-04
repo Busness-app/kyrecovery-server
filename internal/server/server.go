@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -145,6 +146,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/pairing/revoke", s.handlePairingRevoke)
 	s.mux.HandleFunc("/api/pairing/claim", s.handlePairingClaim)
 
+	// Product deposit (bearer product token)
+	s.mux.HandleFunc("/api/backup/deposit", s.handleDeposit)
+
 	// Offsite Replication Routes
 	s.mux.HandleFunc("/api/replication/targets", s.handleReplicationTargets)
 	s.mux.HandleFunc("/api/replication/targets/test", s.handleReplicationTargetTest)
@@ -183,6 +187,7 @@ var apiPolicy = map[string]string{
 	"* /api/auth/logout":       rolePublic,
 	"GET /api/auth/sso/config": rolePublic, // the sign-in page must know whether SSO is offered
 	"* /api/pairing/claim":     rolePublic, // one-time pairing code
+	"* /api/backup/deposit":    rolePublic, // product API token
 
 	"* /api/auth/password":         auth.RoleViewer,
 	"GET /api/readiness":           auth.RoleViewer,
@@ -379,6 +384,7 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.kycap", capsuleID))
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Capsule-Digest", capRec.Digest)
 		w.Write(capsuleBytes)
 
 	default:
@@ -597,7 +603,19 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 		req.AppName = fmt.Sprintf("App-%s", req.PairingCode)
 	}
 
-	app, err := s.db.ClaimPairingCode(r.Context(), req.PairingCode, req.ServiceName, req.AppName)
+	key, err := s.db.GetRecoveryKey(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed reading recovery key")
+		return
+	}
+	if key == nil {
+		// Not a failed attempt by the product: the store is not ready. The code is not consumed
+		// and the limiter is not charged.
+		writeError(w, http.StatusConflict, "No recovery key imported; run the ceremony before pairing products")
+		return
+	}
+
+	app, err := s.db.ClaimPairingCode(r.Context(), req.PairingCode, req.ServiceName, req.AppName, key.KeyID)
 	if err != nil {
 		s.claimLimit.record(ipKey, now)
 		s.claimLimit.record(codeKey, now)
@@ -613,16 +631,20 @@ func (s *Server) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
 		"service_name":     app.ServiceName,
 		"claimed_app_name": app.AppName,
 		"source_address":   clientIP(r),
+		"recovery_key_id":  key.KeyID,
 	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"id":           app.ID,
-		"status":       "paired",
-		"api_token":    app.APIToken,
-		"service_name": app.ServiceName,
-		"app_name":     app.AppName,
-		"paired_at":    app.PairedAt,
-		"server_url":   r.Host,
+		"id":                  app.ID,
+		"status":              "paired",
+		"api_token":           app.APIToken,
+		"service_name":        app.ServiceName,
+		"app_name":            app.AppName,
+		"paired_at":           app.PairedAt,
+		"server_url":          r.Host,
+		"recovery_public_key": base64.StdEncoding.EncodeToString(key.PublicKey),
+		"threshold":           key.Threshold,
+		"total_shares":        key.TotalShares,
 	})
 }
 

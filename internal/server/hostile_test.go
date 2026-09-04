@@ -14,7 +14,6 @@ import (
 	"github.com/Busness-app/kyrecovery-server/internal/audit"
 	"github.com/Busness-app/kyrecovery-server/internal/auth"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
-	"github.com/Busness-app/kyrecovery-server/internal/pairing"
 	"github.com/Busness-app/kyrecovery-server/internal/server"
 )
 
@@ -240,27 +239,4 @@ func TestSessionCookieIsSecureOverTLS(t *testing.T) {
 	if len(cookies) == 0 || !cookies[0].Secure {
 		t.Fatalf("a session created over HTTPS must set Secure: %+v", cookies)
 	}
-}
-
-// pairProduct claims a pairing code and returns the product's API token.
-func pairProduct(t *testing.T, srv *server.Server, database *db.DB, service string) string {
-	t.Helper()
-	pending, err := pairing.GeneratePairingCode(t.Context(), database, 15*time.Minute, service, "Pending")
-	if err != nil {
-		t.Fatalf("GeneratePairingCode failed: %v", err)
-	}
-	body, _ := json.Marshal(map[string]string{"pairing_code": pending.PairingCode, "service_name": service, "app_name": "Test Product"})
-	req := httptest.NewRequest(http.MethodPost, "/api/pairing/claim", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("pairing claim failed: %d %s", rec.Code, rec.Body.String())
-	}
-	var claim struct {
-		APIToken string `json:"api_token"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &claim); err != nil {
-		t.Fatalf("decoding claim failed: %v", err)
-	}
-	return claim.APIToken
 }

@@ -116,7 +116,7 @@ func TestClaimPairingCodeIsSingleUseUnderRace(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			<-start
-			_, err := database.ClaimPairingCode(ctx, "424242", "kynotes", fmt.Sprintf("claimer-%d", n))
+			_, err := database.ClaimPairingCode(ctx, "424242", "kynotes", fmt.Sprintf("claimer-%d", n), "key-test")
 			results <- err
 		}(i)
 	}

@@ -42,6 +42,9 @@ func TestServerEndpoints(t *testing.T) {
 	// records directly rather than through a handler that would have to decrypt.
 	baseID, targetID := seedCapsule(t, database, dataDir, "kysignon", "hash-a"), seedCapsule(t, database, dataDir, "kysignon", "hash-b")
 
+	// Products can only pair once a recovery key is pinned.
+	seedRecoveryKey(t, database)
+
 	// 0a. Test GET /favicon.svg & /favicon.ico
 	favReq := httptest.NewRequest(http.MethodGet, "/favicon.svg", nil)
 	favRec := httptest.NewRecorder()
@@ -329,6 +332,7 @@ func TestPairingClaimIsRateLimited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server.New failed: %v", err)
 	}
+	seedRecoveryKey(t, database)
 
 	claim := func(code string) int {
 		body, _ := json.Marshal(map[string]string{"pairing_code": code, "app_name": "guesser"})
@@ -374,6 +378,7 @@ func TestSuccessfulClaimsDoNotConsumeRateBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server.New failed: %v", err)
 	}
+	seedRecoveryKey(t, database)
 
 	for i := 0; i < 15; i++ {
 		pending, err := pairing.GeneratePairingCode(ctx, database, 15*time.Minute, "kynotes", "Pending Service")

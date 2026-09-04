@@ -25,7 +25,7 @@ func TestPairingCodeGenerateAndClaim(t *testing.T) {
 		t.Fatalf("unexpected pending record: %+v", pending)
 	}
 
-	claimed, err := database.ClaimPairingCode(ctx, pending.PairingCode, "kynotes", "KyNotes Production Cluster")
+	claimed, err := database.ClaimPairingCode(ctx, pending.PairingCode, "kynotes", "KyNotes Production Cluster", "key-test")
 	if err != nil {
 		t.Fatalf("ClaimPairingCode failed: %v", err)
 	}

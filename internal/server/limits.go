@@ -9,11 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/capsule"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
-// maxAPIBodyBytes bounds every API route. The deposit route, which carries a
-// sealed capsule, gets its own ceiling when it lands.
+// maxAPIBodyBytes bounds every API route but the deposit, which carries a sealed
+// capsule and gets the container format's own ceiling.
 const maxAPIBodyBytes = 1 << 20 // 1 MiB
 
 // Login and backup push throttles.
@@ -44,6 +45,9 @@ func validServiceName(name string) bool {
 
 // bodyLimit returns the maximum request body accepted on an API path.
 func bodyLimit(path string) int64 {
+	if path == "/api/backup/deposit" {
+		return capsule.MaxContainerBytes
+	}
 	return maxAPIBodyBytes
 }
 
