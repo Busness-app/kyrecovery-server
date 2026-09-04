@@ -25,4 +25,7 @@ USER kyrecovery
 EXPOSE 8095
 VOLUME ["/app/data"]
 
-ENTRYPOINT ["/app/kyrecovery", "serve", "--port", "8095", "--data-dir", "/app/data"]
+# serve is the default, not the only command: `docker run <image> audit` and
+# `docker run <image> help` have to reach the CLI, so the subcommand is CMD.
+ENTRYPOINT ["/app/kyrecovery"]
+CMD ["serve", "--port", "8095", "--data-dir", "/app/data"]

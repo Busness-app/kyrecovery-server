@@ -8,7 +8,16 @@ services:
     ports:
       - "8095:8095"
     volumes:
+      # kyrecovery.db, secret.key (the keyring master key) and capsules/.
+      # Back all three up together: without secret.key the sealed replication
+      # credentials, the SSO client secret and the audit chain key are lost.
+      # The capsules themselves need the custodians' shares, not this key.
       - ./data:/app/data
-    environment:
-      - PORT=8095
-      - DATA_DIR=/app/data
+    # The port and data directory are entrypoint flags, not environment variables;
+    # override the entrypoint to change them. What is read from the environment:
+    #   KYRECOVERY_SECRET_KEY      keyring master key (hex or base64); else data/secret.key
+    #   KY_SSO_ISSUER, KY_SSO_CLIENT_ID, KY_SSO_CLIENT_SECRET, KY_SSO_REDIRECT_URL
+    #   KY_ADMIN_EMAIL             the SSO identity granted admin
+    #   KY_ADMIN_INITIAL_PASSWORD  local admin password on first start
+    #   KYRECOVERY_COOKIE_SECURE   set true behind TLS
+    environment: []
