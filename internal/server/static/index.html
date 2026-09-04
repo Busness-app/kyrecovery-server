@@ -17,7 +17,7 @@
       <div>
         <div class="brand-title">KyRecovery</div>
       </div>
-      <span class="brand-tag">DISASTER RECOVERY</span>
+      <span class="brand-tag">Recovery vault</span>
     </div>
     <div class="header-meta">
       <div id="system-status-pill" class="status-pill warning">
@@ -25,19 +25,19 @@
       </div>
       <div id="user-auth-area" style="display: flex; align-items: center; gap: 10px;">
         <span id="user-display-name" style="font-size: 13px; font-weight: 600; color: var(--text-main);">Unauthenticated</span>
-        <span id="user-role-badge" class="status-pill danger" style="font-size: 10px; padding: 2px 8px;">GUEST</span>
-        <button id="btn-sso-pair-header" class="btn btn-secondary btn-sm" onclick="openSSOConfigModal()" style="display: none;">⚙️ SSO Pairing</button>
-        <button id="btn-change-pass-header" class="btn btn-secondary btn-sm" onclick="openChangePasswordModal()" style="display: none;">🔒 Password</button>
+        <span id="user-role-badge" class="status-pill danger">Guest</span>
+        <button id="btn-sso-pair-header" class="btn btn-secondary btn-sm" onclick="openSSOConfigModal()" style="display: none;">SSO pairing</button>
+        <button id="btn-change-pass-header" class="btn btn-secondary btn-sm" onclick="openChangePasswordModal()" style="display: none;">Password</button>
         <button id="btn-auth-action" class="btn btn-primary btn-sm" onclick="handleAuthAction()">Sign In</button>
       </div>
     </div>
   </header>
 
   <!-- Login Gateway View (Displayed When Unauthenticated) -->
-  <div id="login-gateway-view" style="display: none; max-width: 460px; margin: 60px auto; padding: 0 20px; width: 100%;">
+  <div id="login-gateway-view" style="display: none; max-width: 480px; margin: 48px auto; padding: 0 20px; width: 100%;">
     <div style="text-align: center; margin-bottom: 24px;">
       <img src="/favicon.svg" alt="KyRecovery" style="width: 56px; height: 56px; border-radius: 12px; margin-bottom: 12px;">
-      <h2 style="font-size: 22px; color: #fff; font-weight: 700;">KyRecovery Access Portal</h2>
+      <h2>Sign in to the vault</h2>
       <p style="color: var(--text-muted); font-size: 13px; margin-top: 6px;">Sign in with your administrator account to access the disaster recovery console.</p>
     </div>
 
@@ -58,9 +58,9 @@
 
       <!-- SSO Alternative (Only shown when SSO is configured & active) -->
       <div id="sso-active-section" style="display: none; margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 20px;">
-        <div style="text-align: center; font-size: 12px; color: var(--text-dim); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px;">Or Connect With</div>
+        <div style="text-align: center; font-size: 12px; color: var(--text-dim); margin-bottom: 12px; ">or</div>
         <button type="button" class="btn btn-secondary" onclick="handleLogin()" style="width: 100%; justify-content: center; padding: 10px 0; border-color: var(--accent-cyan); color: var(--accent-cyan);">
-          🔑 Sign In with KySignOn SSO
+          Sign in with KySignOn
         </button>
       </div>
     </div>
@@ -85,14 +85,14 @@
     <div id="tab-overview" class="tab-content active">
       <div class="metrics-grid">
         <div class="metric-card">
-          <div class="metric-label">Capsules held</div>
+          <div class="metric-label">capsules held, sealed to the suite recovery key</div>
           <div id="metric-capsules" class="metric-value">--</div>
-          <div class="metric-sub">Integrity of stored bytes is attested by the verify sweep (pending); nothing here inspects contents.</div>
+          <div class="metric-sub">Stored bytes are attested by the verify sweep. Nothing here can read a capsule.</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label">Registered Custodians</div>
+          <div class="metric-label">custodians of record</div>
           <div id="metric-custodians" class="metric-value">--</div>
-          <div class="metric-sub">Quorum keyholders of record</div>
+          <div id="metric-custodians-sub" class="metric-sub">Named on the custodian list. The quorum that can reconstruct the key is set by the ceremony.</div>
         </div>
       </div>
 
@@ -109,9 +109,9 @@
     <div id="tab-capsules" class="tab-content">
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Encrypted Recovery Capsules</div>
+          <div class="panel-title">Capsules</div>
           <div style="display: flex; gap: 8px;">
-            <button class="btn btn-secondary btn-sm" onclick="openDiffModal()">🔍 Compare & Diff Versions</button>
+            <button class="btn btn-secondary btn-sm" onclick="openDiffModal()">Compare versions</button>
           </div>
         </div>
         <div style="overflow-x: auto;">
@@ -139,11 +139,11 @@
     <div id="tab-pairing" class="tab-content">
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Paired KySecurity & Business.app Connectors</div>
-          <button class="btn btn-primary btn-sm" onclick="openPairingGenModal()">+ Generate Pairing Code</button>
+          <div class="panel-title">Paired products</div>
+          <button class="btn btn-primary btn-sm" onclick="openPairingGenModal()">New pairing code</button>
         </div>
-        <div style="padding: 16px 20px; background: rgba(77, 238, 234, 0.05); border-bottom: 1px solid var(--border-color); font-size: 13px;">
-          <strong>⚡ Zero-Code Automated Connector</strong>: Enter a pairing code into any KySecurity product or Business.app service. The product seals each backup to the suite recovery public key and deposits the sealed capsule here; this server never sees the contents.
+        <div class="panel-note">
+          <strong>Pairing.</strong> Enter a pairing code into any KySecurity product or Business.app service. The product seals each backup to the suite recovery public key and deposits the sealed capsule here; this server never sees the contents.
         </div>
         <div style="overflow-x: auto;">
           <table class="data-table">
@@ -169,14 +169,14 @@
     <div id="tab-custodians" class="tab-content">
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Suite Recovery Key</div>
+          <div class="panel-title">Recovery key</div>
           <a class="btn btn-primary btn-sm" href="/admin/ceremony" target="_blank" rel="noopener">Run recovery key ceremony</a>
         </div>
         <div class="panel-body" id="recovery-key-status">Loading...</div>
       </div>
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Designated Recovery Custodians</div>
+          <div class="panel-title">Custodians</div>
           <button class="btn btn-primary btn-sm" onclick="openCustodianModal()">+ Register Custodian</button>
         </div>
         <div style="overflow-x: auto;">
@@ -201,11 +201,11 @@
     <div id="tab-replication" class="tab-content">
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Offsite Cloud & Storage Replication Targets</div>
-          <button class="btn btn-primary btn-sm" onclick="openReplicationModal()">+ Add Replication Target</button>
+          <div class="panel-title">Replication targets</div>
+          <button class="btn btn-primary btn-sm" onclick="openReplicationModal()">Add target</button>
         </div>
-        <div style="padding: 16px 20px; background: rgba(77, 238, 234, 0.05); border-bottom: 1px solid var(--border-color); font-size: 13px;">
-          <strong>☁️ Content-Blind Remote Vaulting</strong>: Streams encrypted <code>.kycap</code> archives directly to AWS S3, Cloudflare R2, MinIO, or local offsite mounts. The remote destination only receives pre-encrypted ciphertext and never sees decryption keys or unencrypted master data.
+        <div class="panel-note">
+          <strong>Content-blind vaulting.</strong> Streams encrypted <code>.kycap</code> archives directly to AWS S3, Cloudflare R2, MinIO, or local offsite mounts. The remote destination only receives pre-encrypted ciphertext and never sees decryption keys or unencrypted master data.
         </div>
         <div style="overflow-x: auto;">
           <table class="data-table">
@@ -230,7 +230,7 @@
       <!-- Recent Replication Transfers Panel -->
       <div class="panel" style="margin-top: 24px;">
         <div class="panel-header">
-          <div class="panel-title">Recent Replication Activity Log</div>
+          <div class="panel-title">Recent transfers</div>
         </div>
         <div style="overflow-x: auto;">
           <table class="data-table">
@@ -256,7 +256,7 @@
     <div id="tab-audit" class="tab-content">
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">Tamper-Evident Audit Ledger</div>
+          <div class="panel-title">Audit ledger</div>
           <div style="display: flex; align-items: center; gap: 12px;">
             <span id="chain-verify-status" style="font-size: 12px; font-family: var(--font-mono);"></span>
             <button class="btn btn-secondary btn-sm" onclick="verifyAuditChain()">Verify Cryptographic Chain</button>
@@ -288,7 +288,7 @@
   <div id="pairing-gen-modal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-header">
-        <div class="panel-title">Generate Product Pairing Code</div>
+        <div class="panel-title">New pairing code</div>
         <button class="btn btn-secondary btn-sm" onclick="closePairingGenModal()">✕</button>
       </div>
       <form onsubmit="submitGeneratePairing(event)">
@@ -321,11 +321,11 @@
   <div id="pairing-code-display-modal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-header">
-        <div class="panel-title">Pairing Code Ready</div>
+        <div class="panel-title">Pairing code</div>
         <button class="btn btn-secondary btn-sm" onclick="closePairingDisplayModal()">✕</button>
       </div>
       <div class="modal-body" style="text-align: center;">
-        <div style="font-size: 12px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px;">Enter This Code in Target KySecurity / Business.app</div>
+        <div style="font-size: 12px;  color: var(--text-muted); margin-bottom: 8px;">Enter This Code in Target KySecurity / Business.app</div>
         <div id="display-pairing-code" style="font-size: 42px; font-weight: 800; letter-spacing: 8px; color: var(--accent-cyan); font-family: var(--font-mono); margin: 16px 0; background: var(--bg-card); padding: 12px; border-radius: 8px; border: 1px solid var(--border-color);">
           ------
         </div>
@@ -348,7 +348,7 @@
   <div id="custodian-modal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-header">
-        <div class="panel-title">Register Recovery Custodian</div>
+        <div class="panel-title">Add a custodian</div>
         <button class="btn btn-secondary btn-sm" onclick="closeCustodianModal()">✕</button>
       </div>
       <form onsubmit="submitCustodian(event)">
@@ -374,7 +374,7 @@
   <div id="replication-modal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-header">
-        <div class="panel-title">Add Offsite Replication Target</div>
+        <div class="panel-title">Add a replication target</div>
         <button class="btn btn-secondary btn-sm" onclick="closeReplicationModal()">✕</button>
       </div>
       <form onsubmit="submitReplicationTarget(event)">
@@ -449,7 +449,7 @@
   <div id="diff-modal" class="modal-overlay">
     <div class="modal-card" style="max-width: 780px;">
       <div class="modal-header">
-        <div class="panel-title">Capsule Version Diff & Snapshot Rollback Inspector</div>
+        <div class="panel-title">Compare capsule versions</div>
         <button class="btn btn-secondary btn-sm" onclick="closeDiffModal()">✕</button>
       </div>
       <div class="modal-body">
@@ -469,15 +469,15 @@
           <!-- A blind store can only compare what the deposit declared. -->
           <div style="display: flex; gap: 12px;">
             <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
-              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Payload Drift</div>
+              <div style="font-size: 11px; color: var(--text-muted); ">Payload Drift</div>
               <div id="diff-drift-badge" style="font-size: 14px; font-weight: bold; margin-top: 6px;">IDENTICAL</div>
             </div>
             <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
-              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Quorum Change</div>
+              <div style="font-size: 11px; color: var(--text-muted); ">Quorum Change</div>
               <div id="diff-quorum-delta" style="font-size: 14px; font-weight: bold; font-family: var(--font-mono); margin-top: 6px;">0 / 0</div>
             </div>
             <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
-              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Deposited</div>
+              <div style="font-size: 11px; color: var(--text-muted); ">Deposited</div>
               <div id="diff-created-at" style="font-size: 12px; font-family: var(--font-mono); margin-top: 6px;">—</div>
             </div>
           </div>
@@ -498,7 +498,7 @@
   <div id="sso-config-modal" class="modal-overlay">
     <div class="modal-card" style="max-width: 640px;">
       <div class="modal-header">
-        <div class="panel-title">KySignOn SSO Pairing & Configuration</div>
+        <div class="panel-title">KySignOn sign-in</div>
         <button class="btn btn-secondary btn-sm" onclick="closeSSOConfigModal()">✕</button>
       </div>
       <form onsubmit="submitSSOConfig(event)">
@@ -555,7 +555,7 @@
   <div id="change-password-modal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-header">
-        <div class="panel-title">Change Local Password</div>
+        <div class="panel-title">Change password</div>
         <button class="btn btn-secondary btn-sm" onclick="closeChangePasswordModal()">✕</button>
       </div>
       <form onsubmit="submitChangePassword(event)">
