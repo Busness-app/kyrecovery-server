@@ -1,9 +1,13 @@
 #!/bin/sh
-# Runs as root so a fresh bind-mounted ./data (owned by the host user) can be
-# fixed up to match the fixed container uid, then drops to that uid before
-# exec'ing the app. The app itself never runs as root.
+# Starts as root only to fix ownership of a bind-mounted ./data supplied by the
+# host user, then drops to the app uid. The app never runs as root. When the
+# container is already unprivileged (--user, runAsNonRoot) go straight to it.
 set -e
 
-chown -R kyrecovery:kyrecovery /app/data
+if [ "$(id -u)" = 0 ]; then
+    chown -Rh kyrecovery:kyrecovery /app/data || \
+        echo "data dir not chownable; continuing" >&2
+    exec su-exec kyrecovery /app/kyrecovery "$@"
+fi
 
-exec su-exec kyrecovery /app/kyrecovery "$@"
+exec /app/kyrecovery "$@"
