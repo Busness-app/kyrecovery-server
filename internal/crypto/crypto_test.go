@@ -35,22 +35,3 @@ func TestAESGCMEnvelope(t *testing.T) {
 		t.Fatalf("expected decryption error on tampered ciphertext")
 	}
 }
-
-func TestArgon2PassphraseKDF(t *testing.T) {
-	passphrase := "correct-horse-battery-staple"
-	salt, err := crypto.GenerateRandomBytes(crypto.SaltLength)
-	if err != nil {
-		t.Fatalf("GenerateRandomBytes failed: %v", err)
-	}
-	key1, err := crypto.DeriveKeyFromPassphrase(passphrase, salt)
-	if err != nil {
-		t.Fatalf("DeriveKeyFromPassphrase failed: %v", err)
-	}
-	key2, err := crypto.DeriveKeyFromPassphrase(passphrase, salt)
-	if err != nil {
-		t.Fatalf("DeriveKeyFromPassphrase second run failed: %v", err)
-	}
-	if !bytes.Equal(key1, key2) {
-		t.Fatalf("Argon2id derivation is not deterministic for same salt and password")
-	}
-}

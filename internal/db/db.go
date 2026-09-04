@@ -117,7 +117,6 @@ type UserRecord struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
 	PasswordHash string    `json:"password_hash"`
-	Salt         string    `json:"salt"`
 	Email        string    `json:"email"`
 	Name         string    `json:"name"`
 	Role         string    `json:"role"`
@@ -223,7 +222,6 @@ func (d *DB) migrate() error {
 		id TEXT PRIMARY KEY,
 		username TEXT NOT NULL UNIQUE,
 		password_hash TEXT NOT NULL,
-		salt TEXT NOT NULL,
 		email TEXT NOT NULL,
 		name TEXT NOT NULL,
 		role TEXT NOT NULL DEFAULT 'operator',
@@ -914,18 +912,18 @@ func (d *DB) ListReplicationLogs(ctx context.Context, limit int) ([]ReplicationL
 
 // InsertUser creates a new local user.
 func (d *DB) InsertUser(ctx context.Context, u UserRecord) error {
-	q := `INSERT INTO users (id, username, password_hash, salt, email, name, role, created_at)
-	      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.conn.ExecContext(ctx, q, u.ID, u.Username, u.PasswordHash, u.Salt, u.Email, u.Name, u.Role, u.CreatedAt.UTC())
+	q := `INSERT INTO users (id, username, password_hash, email, name, role, created_at)
+	      VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.conn.ExecContext(ctx, q, u.ID, u.Username, u.PasswordHash, u.Email, u.Name, u.Role, u.CreatedAt.UTC())
 	return err
 }
 
 // GetUserByUsername finds a user by username.
 func (d *DB) GetUserByUsername(ctx context.Context, username string) (*UserRecord, error) {
-	q := `SELECT id, username, password_hash, salt, email, name, role, created_at FROM users WHERE username = ?`
+	q := `SELECT id, username, password_hash, email, name, role, created_at FROM users WHERE username = ?`
 	row := d.conn.QueryRowContext(ctx, q, username)
 	var u UserRecord
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Salt, &u.Email, &u.Name, &u.Role, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.Name, &u.Role, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -936,10 +934,10 @@ func (d *DB) GetUserByUsername(ctx context.Context, username string) (*UserRecor
 
 // GetUserByID finds a user by ID.
 func (d *DB) GetUserByID(ctx context.Context, id string) (*UserRecord, error) {
-	q := `SELECT id, username, password_hash, salt, email, name, role, created_at FROM users WHERE id = ?`
+	q := `SELECT id, username, password_hash, email, name, role, created_at FROM users WHERE id = ?`
 	row := d.conn.QueryRowContext(ctx, q, id)
 	var u UserRecord
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Salt, &u.Email, &u.Name, &u.Role, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.Name, &u.Role, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -948,10 +946,10 @@ func (d *DB) GetUserByID(ctx context.Context, id string) (*UserRecord, error) {
 	return &u, nil
 }
 
-// UpdateUserPassword updates the password hash and salt for a user.
-func (d *DB) UpdateUserPassword(ctx context.Context, id, passwordHash, salt string) error {
-	q := `UPDATE users SET password_hash = ?, salt = ? WHERE id = ?`
-	_, err := d.conn.ExecContext(ctx, q, passwordHash, salt, id)
+// UpdateUserPassword updates the password hash for a user.
+func (d *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
+	q := `UPDATE users SET password_hash = ? WHERE id = ?`
+	_, err := d.conn.ExecContext(ctx, q, passwordHash, id)
 	return err
 }
 

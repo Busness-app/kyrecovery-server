@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +21,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/Busness-app/kyrecovery-server/internal/crypto"
+	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
@@ -166,34 +165,15 @@ func (m *Manager) IsEnabled() bool {
 	return m.cfg.Enabled && m.cfg.IssuerURL != "" && m.cfg.ClientID != ""
 }
 
-// HashPassword generates an Argon2id hash and salt for a password.
-func HashPassword(password string) (hashHex, saltHex string, err error) {
-	salt, err := crypto.GenerateRandomBytes(16)
-	if err != nil {
-		return "", "", err
-	}
-	key, err := crypto.DeriveKeyFromPassphrase(password, salt)
-	if err != nil {
-		return "", "", err
-	}
-	return hex.EncodeToString(key), hex.EncodeToString(salt), nil
+// HashPassword generates a PHC-encoded Argon2id hash for a password.
+func HashPassword(plaintext string) (string, error) {
+	return password.Hash(plaintext)
 }
 
-// VerifyPassword validates a plaintext password against an Argon2id hash and salt.
-func VerifyPassword(password, hashHex, saltHex string) bool {
-	salt, err := hex.DecodeString(saltHex)
-	if err != nil || len(salt) == 0 {
-		return false
-	}
-	expectedKey, err := hex.DecodeString(hashHex)
-	if err != nil || len(expectedKey) != crypto.KeyLength {
-		return false
-	}
-	derivedKey, err := crypto.DeriveKeyFromPassphrase(password, salt)
-	if err != nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare(derivedKey, expectedKey) == 1
+// VerifyPassword validates a plaintext password against a PHC-encoded hash.
+func VerifyPassword(plaintext, encoded string) bool {
+	ok, err := password.Verify(plaintext, encoded)
+	return err == nil && ok
 }
 
 // GenerateRandomPassword creates a strong random password for first-time admin setup.
@@ -230,7 +210,7 @@ func (m *Manager) EnsureAdminUser(ctx context.Context, initialPass string) (pass
 		}
 	}
 
-	hashHex, saltHex, err := HashPassword(pass)
+	hash, err := HashPassword(pass)
 	if err != nil {
 		return "", false, fmt.Errorf("failed hashing admin password: %w", err)
 	}
@@ -239,8 +219,7 @@ func (m *Manager) EnsureAdminUser(ctx context.Context, initialPass string) (pass
 	adminUser := db.UserRecord{
 		ID:           "usr-admin-001",
 		Username:     "admin",
-		PasswordHash: hashHex,
-		Salt:         saltHex,
+		PasswordHash: hash,
 		Email:        "admin@kyrecovery.local",
 		Name:         "System Administrator",
 		Role:         "admin",
@@ -269,7 +248,7 @@ func (m *Manager) AuthenticateLocal(ctx context.Context, username, password stri
 		return nil, errors.New("invalid username or password")
 	}
 
-	if !VerifyPassword(password, user.PasswordHash, user.Salt) {
+	if !VerifyPassword(password, user.PasswordHash) {
 		return nil, errors.New("invalid username or password")
 	}
 

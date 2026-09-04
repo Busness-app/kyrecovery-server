@@ -820,18 +820,18 @@ func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !auth.VerifyPassword(req.OldPassword, user.PasswordHash, user.Salt) {
+	if !auth.VerifyPassword(req.OldPassword, user.PasswordHash) {
 		writeError(w, http.StatusUnauthorized, "Current password is incorrect")
 		return
 	}
 
-	newHash, newSalt, err := auth.HashPassword(req.NewPassword)
+	newHash, err := auth.HashPassword(req.NewPassword)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed hashing new password")
 		return
 	}
 
-	if err := s.db.UpdateUserPassword(r.Context(), user.ID, newHash, newSalt); err != nil {
+	if err := s.db.UpdateUserPassword(r.Context(), user.ID, newHash); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed updating password")
 		return
 	}
