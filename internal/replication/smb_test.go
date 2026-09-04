@@ -123,3 +123,20 @@ func TestNewSMBClientAcceptsUNCAndURLForms(t *testing.T) {
 		}
 	}
 }
+
+// A pasted smb://user:password@host URL must be refused, not stored: Endpoint
+// is cleartext and copied into the audit ledger.
+func TestParseSMBEndpointRejectsUserinfo(t *testing.T) {
+	for _, ep := range []string{"smb://ky:hunter2@nas.lan/Public", "//ky@nas.lan/Public", "SMB://nas.lan:1445/Public"} {
+		addr, share, dir, err := replication.ParseSMBEndpoint(ep, "", "")
+		if strings.Contains(ep, "@") {
+			if err == nil {
+				t.Errorf("%q: expected an error, got addr=%q share=%q dir=%q", ep, addr, share, dir)
+			}
+			continue
+		}
+		if err != nil || addr != "nas.lan:1445" || share != "Public" || dir != "" {
+			t.Errorf("%q: addr=%q share=%q dir=%q err=%v", ep, addr, share, dir, err)
+		}
+	}
+}

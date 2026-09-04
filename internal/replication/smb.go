@@ -24,14 +24,19 @@ type SMBClient struct {
 	Secret  string
 	Dir     string
 	Timeout time.Duration // whole-operation budget; zero means defaultTransferBudget
+	err     error         // endpoint rejected by ParseSMBEndpoint; reported on dial
 }
 
-// NewSMBClient accepts the address as a bare host, host:port, or the forms an
-// operator copies from a file manager: \\host\share\dir, //host/share/dir or
-// smb://host/share/dir. A share or directory given in the path fills in
-// whichever of share and dir was left blank.
-func NewSMBClient(addr, share, user, secret, dir string) *SMBClient {
-	addr = strings.TrimPrefix(strings.ReplaceAll(addr, "\\", "/"), "smb://")
+// ParseSMBEndpoint accepts a bare host, host:port, or the forms an operator
+// copies from a file manager: \\host\share\dir, //host/share/dir or
+// smb://host/share/dir. A share or directory in the path fills in whichever of
+// share and dir was left blank. Userinfo is refused: a pasted
+// smb://user:password@host would put the password in the cleartext endpoint.
+func ParseSMBEndpoint(endpoint, share, dir string) (addr, outShare, outDir string, err error) {
+	addr = strings.ReplaceAll(endpoint, "\\", "/")
+	if len(addr) >= 6 && strings.EqualFold(addr[:6], "smb://") {
+		addr = addr[6:]
+	}
 	addr = strings.TrimLeft(addr, "/")
 	if host, rest, ok := strings.Cut(addr, "/"); ok {
 		addr = host
@@ -43,15 +48,29 @@ func NewSMBClient(addr, share, user, secret, dir string) *SMBClient {
 			dir = pathDir
 		}
 	}
+	if strings.Contains(addr, "@") {
+		return "", "", "", fmt.Errorf("SMB host %q carries a username or password; put the user in the username field and the password in the password field", addr)
+	}
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, "445")
 	}
-	return &SMBClient{Addr: addr, Share: share, User: user, Secret: secret, Dir: strings.Trim(dir, "/")}
+	return addr, share, strings.Trim(dir, "/"), nil
+}
+
+// NewSMBClient builds a client from a target's stored fields. Endpoints are
+// validated with ParseSMBEndpoint when the target is saved; a value that still
+// fails here yields a client whose dial reports the error.
+func NewSMBClient(addr, share, user, secret, dir string) *SMBClient {
+	a, sh, d, err := ParseSMBEndpoint(addr, share, dir)
+	return &SMBClient{Addr: a, Share: sh, User: user, Secret: secret, Dir: d, err: err}
 }
 
 // mount returns the mounted share and a cleanup that logs off and closes. The
 // connection is torn down when ctx ends, which unblocks any stalled I/O.
 func (c *SMBClient) mount(ctx context.Context) (*smb2.Share, func(), error) {
+	if c.err != nil {
+		return nil, nil, c.err
+	}
 	domain, user, _ := strings.Cut(c.User, "\\")
 	if user == "" { // no backslash: Cut put the whole thing in domain
 		domain, user = "", domain

@@ -1126,6 +1126,16 @@ func (s *Server) handleReplicationTargets(w http.ResponseWriter, r *http.Request
 		if target.Status == "" {
 			target.Status = "active"
 		}
+		if target.Type == "smb" {
+			// Endpoint is stored in cleartext and copied into the ledger, so a
+			// pasted smb://user:password@host must be refused before either.
+			addr, share, dir, err := replication.ParseSMBEndpoint(target.Endpoint, target.Bucket, target.Prefix)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			target.Endpoint, target.Bucket, target.Prefix = addr, share, dir
+		}
 		target.CreatedAt = time.Now().UTC()
 
 		if err := s.db.InsertReplicationTarget(ctx, target); err != nil {
