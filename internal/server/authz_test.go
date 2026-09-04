@@ -38,6 +38,7 @@ func TestRequiredRolePolicy(t *testing.T) {
 		{http.MethodGet, "/api/capsules/diff", auth.RoleViewer},
 		{http.MethodGet, "/api/capsules/timeline", auth.RoleViewer},
 		{http.MethodGet, "/api/capsules/cap-abc", auth.RoleViewer},
+		{http.MethodGet, "/api/capsules/cap-abc/verify", auth.RoleViewer},
 		{http.MethodGet, "/api/custodians", auth.RoleViewer},
 		{http.MethodGet, "/api/audit", auth.RoleViewer},
 		{http.MethodGet, "/api/pairing/list", auth.RoleViewer},

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -15,46 +16,62 @@ import (
 // verifyCapsule re-hashes the stored container against the digest recorded at deposit and
 // writes the outcome to the audit chain. It is the only attestation this store can make:
 // the bytes are what arrived. It says nothing about what is inside them.
-func (s *Server) verifyCapsule(ctx context.Context, rec *db.CapsuleRecord) (bool, error) {
+//
+// A missing or unreadable file is not a verification error: it is the strongest possible
+// evidence of corruption. It is flagged the same way a digest mismatch is — the row is
+// marked corrupt, the reason is logged to the audit chain, and (false, nil) is returned so
+// a sweep does not skip the row forever and an on-demand check does not 500.
+func (s *Server) verifyCapsule(ctx context.Context, rec *db.CapsuleRecord, actor string) (bool, error) {
 	f, err := os.Open(rec.FilePath)
 	if err != nil {
-		return false, err
+		return s.markCorrupt(ctx, rec, actor, "file missing")
 	}
 	defer f.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return false, err
+		return s.markCorrupt(ctx, rec, actor, "file unreadable")
 	}
 	valid := hex.EncodeToString(h.Sum(nil)) == rec.Digest
-	action, status := "capsule_verified", "active"
 	if !valid {
-		action, status = "capsule_corrupt", "corrupt"
+		return s.markCorrupt(ctx, rec, actor, "digest mismatch")
 	}
-	if err := s.db.SetCapsuleStatus(ctx, rec.ID, status); err != nil {
-		return valid, err
+	if err := s.db.SetCapsuleStatus(ctx, rec.ID, "active"); err != nil {
+		return true, err
 	}
-	_, _ = s.ledger.Record(ctx, action, "integrity-sweep", rec.ID, map[string]interface{}{"digest": rec.Digest})
-	return valid, nil
+	_, _ = s.ledger.Record(ctx, "capsule_verified", actor, rec.ID, map[string]interface{}{"digest": rec.Digest})
+	return true, nil
+}
+
+// markCorrupt records why a capsule failed verification. It returns (false, nil) rather
+// than an error: the file being gone is the finding, not a failure to find out.
+func (s *Server) markCorrupt(ctx context.Context, rec *db.CapsuleRecord, actor, reason string) (bool, error) {
+	if err := s.db.SetCapsuleStatus(ctx, rec.ID, "corrupt"); err != nil {
+		return false, err
+	}
+	_, _ = s.ledger.Record(ctx, "capsule_corrupt", actor, rec.ID, map[string]interface{}{"digest": rec.Digest, "reason": reason})
+	return false, nil
 }
 
 func (s *Server) handleCapsuleVerify(w http.ResponseWriter, r *http.Request, rec *db.CapsuleRecord) {
-	valid, err := s.verifyCapsule(r.Context(), rec)
+	valid, err := s.verifyCapsule(r.Context(), rec, s.actor(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
+		writeError(w, http.StatusInternalServerError, "Failed recording verification result")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"capsule_id": rec.ID, "digest": rec.Digest, "valid": valid, "checked_at": time.Now().UTC()})
 }
 
-// verifyAll is the daily sweep. It never stops on one bad capsule.
+// verifyAll is the daily sweep. It never stops on one bad capsule. The only error path left
+// once verifyCapsule absorbs file-read failures is a DB write failure, which is logged.
 func (s *Server) verifyAll(ctx context.Context) (checked, corrupt int) {
 	caps, err := s.db.ListCapsules(ctx)
 	if err != nil {
 		return 0, 0
 	}
 	for i := range caps {
-		valid, err := s.verifyCapsule(ctx, &caps[i])
+		valid, err := s.verifyCapsule(ctx, &caps[i], "integrity-sweep")
 		if err != nil {
+			log.Printf("verify: capsule %s: %v", caps[i].ID, err)
 			continue
 		}
 		checked++
