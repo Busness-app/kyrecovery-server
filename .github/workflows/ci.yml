@@ -45,3 +45,5 @@ jobs:
         with:
           persist-credentials: false
       - run: docker build -t kyrecovery:ci .
+      # An image that builds but cannot run is a green build and a broken release.
+      - run: docker run --rm kyrecovery:ci help

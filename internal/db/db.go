@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -46,20 +45,6 @@ type CustodianRecord struct {
 	Email       string    `json:"email"`
 	Fingerprint string    `json:"fingerprint"`
 	CreatedAt   time.Time `json:"created_at"`
-}
-
-// DrillRecord represents the outcome of an ephemeral restore drill.
-type DrillRecord struct {
-	ID           string    `json:"id"`
-	CapsuleID    string    `json:"capsule_id"`
-	ServiceName  string    `json:"service_name"`
-	Status       string    `json:"status"` // "passed", "failed"
-	DurationMs   int64     `json:"duration_ms"`
-	MissingDeps  []string  `json:"missing_deps"`
-	ErrorMessage string    `json:"error_message"`
-	DetailsJSON  string    `json:"details_json"`
-	StartedAt    time.Time `json:"started_at"`
-	CompletedAt  time.Time `json:"completed_at"`
 }
 
 // AuditRecord represents one link of the tamper-evident audit chain. CreatedAt is
@@ -261,20 +246,6 @@ func (d *DB) migrate() error {
 		created_at DATETIME NOT NULL
 	);
 
-	CREATE TABLE IF NOT EXISTS drills (
-		id TEXT PRIMARY KEY,
-		capsule_id TEXT NOT NULL,
-		service_name TEXT NOT NULL,
-		status TEXT NOT NULL,
-		duration_ms INTEGER NOT NULL,
-		missing_deps TEXT NOT NULL DEFAULT '[]',
-		error_message TEXT NOT NULL DEFAULT '',
-		details_json TEXT NOT NULL DEFAULT '{}',
-		started_at DATETIME NOT NULL,
-		completed_at DATETIME NOT NULL,
-		FOREIGN KEY (capsule_id) REFERENCES capsules(id) ON DELETE CASCADE
-	);
-
 	CREATE TABLE IF NOT EXISTS audit_events (
 		seq INTEGER PRIMARY KEY,
 		prev_hash TEXT NOT NULL,
@@ -356,7 +327,6 @@ func (d *DB) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 	CREATE INDEX IF NOT EXISTS idx_capsules_service ON capsules(service_name);
-	CREATE INDEX IF NOT EXISTS idx_drills_capsule ON drills(capsule_id);
 	CREATE INDEX IF NOT EXISTS idx_paired_code ON paired_apps(pairing_code);
 	CREATE INDEX IF NOT EXISTS idx_paired_token ON paired_apps(api_token);
 	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -453,58 +423,6 @@ func (d *DB) ListCustodians(ctx context.Context) ([]CustodianRecord, error) {
 		list = append(list, c)
 	}
 	return list, rows.Err()
-}
-
-// InsertDrill records a drill execution.
-func (d *DB) InsertDrill(ctx context.Context, dr DrillRecord) error {
-	depsJSON, err := json.Marshal(dr.MissingDeps)
-	if err != nil {
-		depsJSON = []byte("[]")
-	}
-
-	q := `INSERT INTO drills (id, capsule_id, service_name, status, duration_ms, missing_deps, error_message, details_json, started_at, completed_at)
-	      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err = d.conn.ExecContext(ctx, q, dr.ID, dr.CapsuleID, dr.ServiceName, dr.Status, dr.DurationMs, string(depsJSON), dr.ErrorMessage, dr.DetailsJSON, dr.StartedAt.UTC(), dr.CompletedAt.UTC())
-	return err
-}
-
-// ListDrills returns drill history.
-func (d *DB) ListDrills(ctx context.Context, limit int) ([]DrillRecord, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	q := `SELECT id, capsule_id, service_name, status, duration_ms, missing_deps, error_message, details_json, started_at, completed_at FROM drills ORDER BY started_at DESC LIMIT ?`
-	rows, err := d.conn.QueryContext(ctx, q, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []DrillRecord
-	for rows.Next() {
-		var (
-			dr       DrillRecord
-			depsJSON string
-		)
-		if err := rows.Scan(&dr.ID, &dr.CapsuleID, &dr.ServiceName, &dr.Status, &dr.DurationMs, &depsJSON, &dr.ErrorMessage, &dr.DetailsJSON, &dr.StartedAt, &dr.CompletedAt); err != nil {
-			return nil, err
-		}
-		_ = json.Unmarshal([]byte(depsJSON), &dr.MissingDeps)
-		list = append(list, dr)
-	}
-	return list, rows.Err()
-}
-
-// GetLastDrill retrieves the most recent drill.
-func (d *DB) GetLastDrill(ctx context.Context) (*DrillRecord, error) {
-	list, err := d.ListDrills(ctx, 1)
-	if err != nil {
-		return nil, err
-	}
-	if len(list) == 0 {
-		return nil, nil
-	}
-	return &list[0], nil
 }
 
 const auditCols = `seq, prev_hash, event_hash, action, actor, target_id, details_json, created_at`

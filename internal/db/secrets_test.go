@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,15 @@ func TestKeyFileIsCreatedOutsideTheDatabase(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0600 {
 		t.Fatalf("key file permissions are %o, want 0600", perm)
+	}
+	// keyfile writes hex, the suite's spelling: an operator can read, copy and diff the
+	// key without a tool, and no one has to guess whether the bytes are raw or encoded.
+	raw, err := os.ReadFile(filepath.Join(dir, "secret.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key, err := hex.DecodeString(strings.TrimSpace(string(raw))); err != nil || len(key) != 32 {
+		t.Fatalf("key file is not 32 bytes of hex: %v (%d bytes decoded)", err, len(key))
 	}
 }
 

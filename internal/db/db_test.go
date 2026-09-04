@@ -57,31 +57,6 @@ func TestDatabaseOperations(t *testing.T) {
 	if err != nil || len(custodians) != 1 {
 		t.Fatalf("ListCustodians failed: %v, count=%d", err, len(custodians))
 	}
-
-	// 3. Insert & List Drills
-	drill := db.DrillRecord{
-		ID:           "drill-001",
-		CapsuleID:    "cap-001",
-		ServiceName:  "kysignon",
-		Status:       "passed",
-		DurationMs:   145,
-		MissingDeps:  []string{},
-		ErrorMessage: "",
-		DetailsJSON:  `{"checks": 5}`,
-		StartedAt:    time.Now().UTC().Add(-time.Second),
-		CompletedAt:  time.Now().UTC(),
-	}
-	if err := database.InsertDrill(ctx, drill); err != nil {
-		t.Fatalf("InsertDrill failed: %v", err)
-	}
-
-	lastDrill, err := database.GetLastDrill(ctx)
-	if err != nil || lastDrill == nil {
-		t.Fatalf("GetLastDrill failed: %v", err)
-	}
-	if lastDrill.Status != "passed" || lastDrill.DurationMs != 145 {
-		t.Fatalf("last drill data mismatch: %+v", lastDrill)
-	}
 }
 
 // InsertCapsule must classify a primary-key collision as ErrCapsuleExists so callers

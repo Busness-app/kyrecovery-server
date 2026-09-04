@@ -1,10 +1,13 @@
 import fs from 'node:fs';
 import { webcrypto } from 'node:crypto';
+
+// Paths resolve against this script, not against whoever ran it.
+const wasmDir = new URL('../internal/server/static/wasm/', import.meta.url);
 globalThis.crypto ??= webcrypto;
 globalThis.fs = fs;
-await import('../internal/server/static/wasm/wasm_exec.js');
+await import(new URL('wasm_exec.js', wasmDir));
 const go = new Go();
-const { instance } = await WebAssembly.instantiate(fs.readFileSync('internal/server/static/wasm/ceremony.wasm'), go.importObject);
+const { instance } = await WebAssembly.instantiate(fs.readFileSync(new URL('ceremony.wasm', wasmDir)), go.importObject);
 go.run(instance); // main blocks on select{}; read the global on the next tick
 await new Promise(r => setTimeout(r, 0));
 const r = globalThis.kyCeremony(3, 5);

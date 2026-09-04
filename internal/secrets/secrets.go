@@ -89,11 +89,16 @@ func (k *Keyring) Seal(plaintext string) (string, error) {
 	return sealedPrefix + base64.StdEncoding.EncodeToString(append(nonce, ct...)), nil
 }
 
-// Open decrypts a value produced by Seal. Values written before encryption existed
-// are returned unchanged so upgrades do not lose credentials.
+// Open decrypts a value produced by Seal. A stored value that is not a sealed envelope is
+// an error, not a credential: returning it unchanged would let anyone who can write the
+// database choose a plaintext secret the server then uses as if it had sealed it itself.
+// Empty is not a value and stays empty.
 func (k *Keyring) Open(stored string) (string, error) {
+	if stored == "" {
+		return "", nil
+	}
 	if !IsSealed(stored) {
-		return stored, nil
+		return "", errors.New("stored secret is not sealed")
 	}
 	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, sealedPrefix))
 	if err != nil || len(blob) <= crypto.NonceLength {
