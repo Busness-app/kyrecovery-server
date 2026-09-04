@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -80,6 +81,19 @@ type PairedAppRecord struct {
 	LastBackupAt *time.Time `json:"last_backup_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 }
+
+// RecoveryKeyRecord is the suite recovery public key this store hands to products and pins
+// deposits against. There is exactly one row; the private half never existed here.
+type RecoveryKeyRecord struct {
+	KeyID       string    `json:"key_id"`
+	PublicKey   []byte    `json:"-"`
+	Threshold   int       `json:"threshold"`
+	TotalShares int       `json:"total_shares"`
+	ImportedBy  string    `json:"imported_by"`
+	ImportedAt  time.Time `json:"imported_at"`
+}
+
+var ErrRecoveryKeyExists = errors.New("a recovery key is already imported")
 
 // UserRecord represents a local user account.
 type UserRecord struct {
@@ -300,6 +314,16 @@ func (d *DB) migrate() error {
 		error_message TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		FOREIGN KEY (target_id) REFERENCES replication_targets(id) ON DELETE CASCADE
+	);
+
+	CREATE TABLE IF NOT EXISTS recovery_key (
+		singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+		key_id TEXT NOT NULL,
+		public_key BLOB NOT NULL,
+		threshold INTEGER NOT NULL,
+		total_shares INTEGER NOT NULL,
+		imported_by TEXT NOT NULL,
+		imported_at DATETIME NOT NULL
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
@@ -605,6 +629,31 @@ func (d *DB) RevokePairedApp(ctx context.Context, id string) error {
 	q := `UPDATE paired_apps SET status = 'revoked' WHERE id = ?`
 	_, err := d.conn.ExecContext(ctx, q, id)
 	return err
+}
+
+// InsertRecoveryKey pins the suite recovery public key. Only one row is ever allowed.
+func (d *DB) InsertRecoveryKey(ctx context.Context, k RecoveryKeyRecord) error {
+	q := `INSERT INTO recovery_key (singleton, key_id, public_key, threshold, total_shares, imported_by, imported_at)
+	      VALUES (1, ?, ?, ?, ?, ?, ?)`
+	_, err := d.conn.ExecContext(ctx, q, k.KeyID, k.PublicKey, k.Threshold, k.TotalShares, k.ImportedBy, k.ImportedAt.UTC())
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return ErrRecoveryKeyExists
+	}
+	return err
+}
+
+// GetRecoveryKey returns the pinned recovery key, or (nil, nil) if none has been imported.
+func (d *DB) GetRecoveryKey(ctx context.Context) (*RecoveryKeyRecord, error) {
+	q := `SELECT key_id, public_key, threshold, total_shares, imported_by, imported_at FROM recovery_key WHERE singleton = 1`
+	var k RecoveryKeyRecord
+	err := d.conn.QueryRowContext(ctx, q).Scan(&k.KeyID, &k.PublicKey, &k.Threshold, &k.TotalShares, &k.ImportedBy, &k.ImportedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &k, nil
 }
 
 // InsertSession stores a new user session.
