@@ -267,10 +267,15 @@ async function loadPairing() {
           <div style="font-size: 12px;">${p.status === 'paired' && p.paired_at ? new Date(p.paired_at).toLocaleString() : 'Expires ' + new Date(p.expires_at).toLocaleTimeString()}</div>
         </td>
         <td class="admin-only" style="display:none; text-align:right;">
-          ${p.status === 'revoked' ? '' : `<button class="btn btn-danger btn-sm" onclick="revokePairing('${esc(p.id)}', '${esc(p.app_name)}')">Revoke</button>`}
+          ${p.status === 'revoked' ? '' : `<button class="btn btn-danger btn-sm revoke-pairing" data-id="${esc(p.id)}" data-app-name="${esc(p.app_name)}">Revoke</button>`}
         </td>
       </tr>
     `).join('');
+    // Bound here rather than inline: app_name is chosen by whoever claims a code, so it
+    // never goes inside a script string.
+    tbody.querySelectorAll('.revoke-pairing').forEach(btn => {
+      btn.addEventListener('click', () => revokePairing(btn.dataset.id, btn.dataset.appName));
+    });
     applyAdminOnly();
   } catch (err) {
     console.error('Error fetching pairing list:', err);
