@@ -61,8 +61,8 @@ async function loadReadiness() {
     const dot = '<span class="dot"></span> ';
     statusPill.className = capsuleCount > 0 ? 'status-pill ready' : 'status-pill warning';
     statusPill.innerHTML = capsuleCount > 0
-      ? dot + capsuleCount + ' CAPSULE' + (capsuleCount === 1 ? '' : 'S') + ' STORED'
-      : dot + 'NO CAPSULES STORED';
+      ? dot + capsuleCount + ' capsule' + (capsuleCount === 1 ? '' : 's') + ' stored'
+      : dot + 'No capsules stored';
   } catch (err) {
     console.error('Error fetching readiness:', err);
   }
@@ -79,7 +79,7 @@ async function loadCapsules() {
     const capsules = await res.json() || [];
 
     if (capsules.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-dim);">No capsules deposited yet. A paired product deposits its own sealed capsules.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-dim);">No capsules yet. Pair a product and it will deposit its own sealed backups here.</td></tr>';
       return;
     }
 
@@ -112,7 +112,7 @@ async function loadCustodians() {
     const list = await res.json() || [];
 
     if (list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-dim);">No custodians registered.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-dim);">No custodians yet.</td></tr>';
       return;
     }
 
@@ -159,7 +159,7 @@ async function loadAudit() {
     const events = await res.json() || [];
 
     if (events.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No audit records found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No ledger entries yet.</td></tr>';
       return;
     }
 
@@ -239,7 +239,7 @@ async function loadPairing() {
     const list = await res.json() || [];
 
     if (list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No paired products or pending pairing codes. Click "+ Generate Pairing Code" above.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No paired products yet. Create a pairing code and enter it in a KySecurity product.</td></tr>';
       return;
     }
 
@@ -254,7 +254,7 @@ async function loadPairing() {
         </td>
         <td>
           <span class="status-pill ${p.status === 'paired' ? 'ready' : (p.status === 'pending' ? 'warning' : 'danger')}">
-            <span class="dot"></span> ${esc(String(p.status).toUpperCase())}
+            <span class="dot"></span> ${esc(String(p.status))}
           </span>
         </td>
         <td>${p.last_backup_at ? new Date(p.last_backup_at).toLocaleString() : '<span style="color: var(--text-dim);">Never</span>'}</td>
@@ -342,7 +342,7 @@ async function loadAuthUser() {
       currentUser = data.user;
       if (nameEl) nameEl.textContent = data.user.name || data.user.email || data.user.username;
       if (roleEl) {
-        roleEl.textContent = (data.user.role || 'operator').toUpperCase();
+        roleEl.textContent = data.user.role || 'operator';
         roleEl.className = `status-pill ${data.user.role === 'admin' ? 'ready' : 'warning'}`;
       }
       if (btn) {
@@ -366,7 +366,7 @@ async function loadAuthUser() {
       currentUser = null;
       if (nameEl) nameEl.textContent = 'Unauthenticated';
       if (roleEl) {
-        roleEl.textContent = 'GUEST';
+        roleEl.textContent = 'Guest';
         roleEl.className = 'status-pill danger';
       }
       if (btn) {
@@ -595,14 +595,14 @@ async function loadReplicationTargets() {
     const list = await res.json() || [];
 
     if (list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-dim);">No offsite replication targets configured. Click "+ Add Replication Target" above to configure Cloudflare R2, AWS S3, MinIO, or local mounts.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-dim);">No replication targets yet. Add one and every new capsule is copied offsite.</td></tr>';
       return;
     }
 
     tbody.innerHTML = list.map(t => `
       <tr>
         <td><strong>${esc(t.name)}</strong></td>
-        <td><span class="pill-badge">${esc(String(t.type).toUpperCase())}</span></td>
+        <td><span class="pill-badge">${esc(String(t.type))}</span></td>
         <td>
           <code style="font-size: 12px;">${esc(t.type === 's3' ? (t.bucket + ' (' + t.region + ')') : t.type === 'smb' ? (t.endpoint + '/' + t.bucket) : t.endpoint)}</code>
         </td>
@@ -613,7 +613,7 @@ async function loadReplicationTargets() {
         </td>
         <td>
           <span class="status-pill ${t.status === 'active' ? 'ready' : (t.status === 'error' ? 'danger' : 'warning')}">
-            <span class="dot"></span> ${esc(String(t.status).toUpperCase())}
+            <span class="dot"></span> ${esc(String(t.status))}
           </span>
         </td>
         <td>${t.last_sync_at ? new Date(t.last_sync_at).toLocaleString() : '<span style="color: var(--text-dim);">Never</span>'}</td>
@@ -638,7 +638,7 @@ async function loadReplicationLogs() {
     const list = await res.json() || [];
 
     if (list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No recent transfer activity.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No transfers yet.</td></tr>';
       return;
     }
 
@@ -651,7 +651,7 @@ async function loadReplicationLogs() {
         <td>${Number(l.duration_ms) || 0} ms</td>
         <td>
           <span class="status-pill ${l.status === 'success' ? 'ready' : 'danger'}">
-            <span class="dot"></span> ${esc(String(l.status).toUpperCase())}
+            <span class="dot"></span> ${esc(String(l.status))}
           </span>
         </td>
       </tr>
