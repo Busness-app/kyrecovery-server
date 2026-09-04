@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,6 +177,72 @@ func TestDepositRefusals(t *testing.T) {
 	}
 	if rec := deposit(srv, "kyrec_live_bogus", sealFor(t, k.Public(), "kynotes")); rec.Code != http.StatusUnauthorized {
 		t.Errorf("bad token: %d", rec.Code)
+	}
+}
+
+// A product that retries a deposit while the first is still in flight must not be able to
+// destroy the capsule the first one stored. The database row is the mutex; the file follows.
+func TestConcurrentIdenticalDepositsStoreExactlyOneCapsule(t *testing.T) {
+	srv, cookie, database := newAdminServer(t)
+	k, _ := recoverykey.Generate()
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	raw := sealFor(t, k.Public(), "kynotes")
+	m, err := capsule.ReadUnverifiedManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 8
+	codes := make([]int, racers)
+	var start sync.WaitGroup
+	var done sync.WaitGroup
+	start.Add(1)
+	for i := range racers {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			start.Wait()
+			codes[i] = deposit(srv, token, raw).Code
+		}()
+	}
+	start.Done()
+	done.Wait()
+
+	created := 0
+	for i, code := range codes {
+		switch code {
+		case http.StatusCreated:
+			created++
+		case http.StatusOK:
+		default:
+			t.Errorf("racer %d: %d, want 200 or 201", i, code)
+		}
+	}
+	if created != 1 {
+		t.Errorf("%d racers were told they created the capsule, want exactly 1", created)
+	}
+
+	all, err := database.ListCapsules(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ID != m.CapsuleID {
+		t.Fatalf("want exactly one row for %s, got %+v", m.CapsuleID, all)
+	}
+	// The row must describe a file that is actually there and actually the deposited bytes.
+	onDisk, err := os.ReadFile(all[0].FilePath)
+	if err != nil {
+		t.Fatalf("the stored capsule is gone: %v", err)
+	}
+	sum := sha256.Sum256(onDisk)
+	if hex.EncodeToString(sum[:]) != all[0].Digest || !bytes.Equal(onDisk, raw) {
+		t.Fatalf("the stored file does not match the recorded digest")
+	}
+	// No temporary file was left behind by the losers.
+	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(all[0].FilePath), "*.tmp*"))
+	if len(leftovers) != 0 {
+		t.Errorf("racing deposits left temporary files: %v", leftovers)
 	}
 }
 

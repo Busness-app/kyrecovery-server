@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +44,14 @@ func validServiceName(name string) bool {
 	return serviceNamePattern.MatchString(name) && !strings.Contains(name, "..")
 }
 
+// capsuleIDPattern is the same alphabet as a service name, with room for the honest shape
+// a sealer mints: "cap-" + a service name of up to 64 + "-" + 19 digits of UnixNano.
+var capsuleIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
+
+func validCapsuleID(id string) bool {
+	return capsuleIDPattern.MatchString(id) && !strings.Contains(id, "..")
+}
+
 // bodyLimit returns the maximum request body accepted on an API path.
 func bodyLimit(path string) int64 {
 	if path == "/api/backup/deposit" {
@@ -51,38 +60,54 @@ func bodyLimit(path string) int64 {
 	return maxAPIBodyBytes
 }
 
-// publishCapsule durably stores a capsule and its database record. The bytes are
-// written to a temporary file, fsynced and renamed into place before the record
-// is committed, so an existing recovery point is never overwritten and no record
-// can describe a file that was never fully written.
+// publishCapsule durably stores a capsule and its database record.
+//
+// The database row is the mutual-exclusion primitive, not the file: the primary key makes
+// InsertCapsule atomic, so exactly one of any number of racing deposits of the same capsule
+// ID claims the path. Order matters. The bytes are written to a private temporary file and
+// fsynced first, so no record can describe a file that was never fully written; the row is
+// then claimed; only the request that won the row renames its temporary file into place.
+// A loser removes its own temporary file and nothing else — an earlier version renamed
+// first and deleted rec.FilePath when the insert failed, which let a retry racing the
+// original delete a capsule the store had already published.
 func (s *Server) publishCapsule(ctx context.Context, rec db.CapsuleRecord, capsuleBytes []byte) error {
-	tmpPath := rec.FilePath + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	f, err := os.CreateTemp(filepath.Dir(rec.FilePath), filepath.Base(rec.FilePath)+".tmp")
 	if err != nil {
 		return fmt.Errorf("failed creating capsule file: %w", err)
 	}
+	tmpPath := f.Name()
+	cleanup := func() { os.Remove(tmpPath) }
 	if _, err := f.Write(capsuleBytes); err != nil {
 		f.Close()
-		os.Remove(tmpPath)
+		cleanup()
 		return fmt.Errorf("failed writing capsule file: %w", err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		os.Remove(tmpPath)
+		cleanup()
 		return fmt.Errorf("failed flushing capsule file: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
+		cleanup()
 		return fmt.Errorf("failed closing capsule file: %w", err)
 	}
-
-	if err := os.Rename(tmpPath, rec.FilePath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed publishing capsule file: %w", err)
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		cleanup()
+		return fmt.Errorf("failed setting capsule file mode: %w", err)
 	}
+
 	if err := s.db.InsertCapsule(ctx, rec); err != nil {
-		os.Remove(rec.FilePath)
+		cleanup()
+		if errors.Is(err, db.ErrCapsuleExists) {
+			return err
+		}
 		return fmt.Errorf("failed recording capsule: %w", err)
+	}
+	if err := os.Rename(tmpPath, rec.FilePath); err != nil {
+		// The row is this request's, so releasing it is safe.
+		_ = s.db.DeleteCapsule(ctx, rec.ID)
+		cleanup()
+		return fmt.Errorf("failed publishing capsule file: %w", err)
 	}
 	return nil
 }

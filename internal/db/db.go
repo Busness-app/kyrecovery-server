@@ -106,6 +106,10 @@ type RecoveryKeyRecord struct {
 
 var ErrRecoveryKeyExists = errors.New("a recovery key is already imported")
 
+// ErrCapsuleExists reports that a capsule row with this ID is already stored. The row is the
+// mutual-exclusion primitive for a deposit: whoever inserts it owns the file path.
+var ErrCapsuleExists = errors.New("a capsule with this ID is already stored")
+
 // UserRecord represents a local user account.
 type UserRecord struct {
 	ID           string    `json:"id"`
@@ -366,6 +370,16 @@ func (d *DB) InsertCapsule(ctx context.Context, c CapsuleRecord) error {
 	_, err := d.conn.ExecContext(ctx, q, c.ID, c.ServiceName, c.AppName, c.AppVersion, c.FilePath, c.SizeBytes,
 		c.Digest, c.PayloadHash, c.Threshold, c.TotalShares, c.RecoveryKeyID, c.EncapsulatedKey,
 		c.CreatedAt.UTC(), c.DepositedAt.UTC(), c.PairedAppID, c.Status)
+	if err != nil && strings.Contains(err.Error(), "constraint failed") {
+		return ErrCapsuleExists
+	}
+	return err
+}
+
+// DeleteCapsule removes a capsule row. It is the rollback for a publish that claimed the row
+// and then failed to put the file in place.
+func (d *DB) DeleteCapsule(ctx context.Context, id string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM capsules WHERE id = ?`, id)
 	return err
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -78,7 +79,9 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, fmt.Sprintf("capsule names service %q; this token is paired for %q", m.ServiceName, app.ServiceName))
 		return
 	}
-	if m.CapsuleID == "" || !validServiceName(m.ServiceName) || strings.ContainsAny(m.CapsuleID, "/\\\x00") {
+	// The capsule ID becomes a filename, so it is held to an allowlist rather than a
+	// denylist of separators.
+	if !validCapsuleID(m.CapsuleID) || !validServiceName(m.ServiceName) {
 		writeError(w, http.StatusBadRequest, "Manifest capsule_id or service_name is not a usable name")
 		return
 	}
@@ -86,12 +89,15 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
 
-	if existing, _ := s.db.GetCapsule(ctx, m.CapsuleID); existing != nil {
-		if existing.Digest == digest {
-			writeJSON(w, http.StatusOK, depositResponse(existing))
-			return
-		}
-		writeError(w, http.StatusConflict, "A different capsule with this ID is already stored")
+	// Fast path only. The row claimed by publishCapsule below is what actually decides.
+	existing, err := s.db.GetCapsule(ctx, m.CapsuleID)
+	if err != nil {
+		log.Printf("deposit: reading capsule %s: %v", m.CapsuleID, err)
+		writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
+		return
+	}
+	if existing != nil {
+		s.respondToDuplicate(w, existing, digest)
 		return
 	}
 
@@ -103,7 +109,20 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: m.CreatedAt, DepositedAt: now.UTC(), PairedAppID: app.ID, Status: "active",
 	}
 	if err := s.publishCapsule(ctx, rec, raw); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, db.ErrCapsuleExists) {
+			// A concurrent deposit of the same ID won the row. Re-read it and answer as if
+			// the pre-check had seen it.
+			stored, getErr := s.db.GetCapsule(ctx, rec.ID)
+			if getErr != nil || stored == nil {
+				log.Printf("deposit: re-reading capsule %s after a lost race: %v", rec.ID, getErr)
+				writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
+				return
+			}
+			s.respondToDuplicate(w, stored, digest)
+			return
+		}
+		log.Printf("deposit: publishing capsule %s: %v", rec.ID, err)
+		writeError(w, http.StatusInternalServerError, "Failed storing capsule")
 		return
 	}
 	_ = s.db.UpdateAppLastBackup(ctx, app.ID)
@@ -112,6 +131,16 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		"service_name": rec.ServiceName, "digest": digest, "size_bytes": rec.SizeBytes, "recovery_key_id": rec.RecoveryKeyID,
 	})
 	writeJSON(w, http.StatusCreated, depositResponse(&rec))
+}
+
+// respondToDuplicate answers a deposit whose ID is already stored: identical bytes are the
+// idempotent retry the products actually make, anything else is a collision.
+func (s *Server) respondToDuplicate(w http.ResponseWriter, stored *db.CapsuleRecord, digest string) {
+	if stored.Digest == digest {
+		writeJSON(w, http.StatusOK, depositResponse(stored))
+		return
+	}
+	writeError(w, http.StatusConflict, "A different capsule with this ID is already stored")
 }
 
 func depositResponse(rec *db.CapsuleRecord) map[string]any {

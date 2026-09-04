@@ -2,8 +2,10 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/Busness-app/ky-primitives/capsule"
 	"github.com/Busness-app/kyrecovery-server/internal/auth"
 )
 
@@ -24,6 +26,7 @@ func TestRequiredRolePolicy(t *testing.T) {
 		{http.MethodPost, "/api/auth/logout", rolePublic},
 		{http.MethodGet, "/api/auth/sso/config", rolePublic},
 		{http.MethodPost, "/api/pairing/claim", rolePublic},
+		{http.MethodPost, "/api/backup/deposit", rolePublic}, // product bearer token, checked in the handler
 
 		// Read-only.
 		{http.MethodPost, "/api/auth/password", auth.RoleViewer},
@@ -87,6 +90,24 @@ func TestBodyLimits(t *testing.T) {
 	for _, path := range []string{"/api/capsules", "/api/pairing/claim", "/api/custodians"} {
 		if bodyLimit(path) != maxAPIBodyBytes {
 			t.Fatalf("%s must use the small body limit", path)
+		}
+	}
+	// The deposit carries a sealed container, and only the deposit.
+	if bodyLimit("/api/backup/deposit") != int64(capsule.MaxContainerBytes) {
+		t.Fatalf("the deposit must accept a whole container, got %d", bodyLimit("/api/backup/deposit"))
+	}
+}
+
+func TestValidCapsuleID(t *testing.T) {
+	// The shape a sealer mints, at the widest a service name may be.
+	honest := "cap-" + strings.Repeat("s", 64) + "-1788490198114479660"
+	if !validCapsuleID(honest) {
+		t.Fatalf("an honest capsule ID must be accepted: %q (%d bytes)", honest, len(honest))
+	}
+	for _, bad := range []string{"", "../../etc/passwd", "a/b", "..", "cap id", "cap\\id",
+		"x..y/../z", "-leading", "cap\x00", strings.Repeat("a", 129)} {
+		if validCapsuleID(bad) {
+			t.Errorf("capsule ID %q must be rejected: it becomes a filename", bad)
 		}
 	}
 }
