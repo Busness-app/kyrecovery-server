@@ -70,3 +70,45 @@ func ask(t *testing.T, srv *server.Server, cookie *http.Cookie, method, path str
 	}
 	return out
 }
+
+// Sealed bytes leaving the store is the event that most needs a record. If the ledger
+// cannot append it, the download does not happen: an unlogged copy of a capsule is exactly
+// what an operator would later need the log to rule out.
+func TestPoisonedLedgerRefusesDownloads(t *testing.T) {
+	srv, cookie, database := newAdminServer(t)
+	k, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	if rec := deposit(srv, token, sealFor(t, k.Public(), "kynotes")); rec.Code != http.StatusCreated {
+		t.Fatalf("deposit: %d %s", rec.Code, rec.Body.String())
+	}
+	caps, _ := database.ListCapsules(t.Context())
+	id := caps[0].ID
+
+	last, err := database.GetLastAuditEvent(t.Context())
+	if err != nil || last == nil {
+		t.Fatalf("last audit event: %v %v", last, err)
+	}
+	if err := database.DeleteAuditEventForTest(t.Context(), last.Seq); err != nil {
+		t.Fatal(err)
+	}
+	poisoned, err := server.New(server.Config{Port: 8098, DataDir: t.TempDir()}, database, audit.NewLedger(database))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(poisoned.Close)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/capsules/"+id+"/download", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	poisoned.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("download onto a poisoned ledger: %d, want 503", rr.Code)
+	}
+	if rr.Header().Get("Content-Disposition") != "" {
+		t.Fatal("the refused download still started sending a capsule")
+	}
+}
