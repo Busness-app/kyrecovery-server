@@ -22,13 +22,13 @@ jobs:
       # the build and test steps below can read. ky-primitives is public, so this workflow
       # needs and references no repository secret.
       - name: Check out this repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: consumer
           persist-credentials: false
 
       - name: Check out ky-primitives default branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Busness-app/ky-primitives
           path: ky-primitives
@@ -37,7 +37,7 @@ jobs:
       # cache: false. setup-go's post-step would save caches written by an unreviewed
       # default branch of another repository into the scope ci.yml's merge gates restore
       # from. This job runs once a day and can build cold.
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: consumer/go.mod
           cache: false
