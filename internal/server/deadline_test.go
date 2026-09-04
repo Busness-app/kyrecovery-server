@@ -42,9 +42,7 @@ func TestASlowBodyOnASmallRouteIsCutOff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restore := requestReadBudget
-	requestReadBudget = 150 * time.Millisecond // a real one is 30s; this proves the mechanism
-	t.Cleanup(func() { requestReadBudget = restore })
+	s.readBudget = 150 * time.Millisecond // a real one is 30s; this proves the mechanism
 
 	ts := httptest.NewServer(s)
 	defer ts.Close()
@@ -66,5 +64,28 @@ func TestASlowBodyOnASmallRouteIsCutOff(t *testing.T) {
 	}
 	if err == nil && resp.StatusCode/100 == 2 {
 		t.Fatalf("a body that never arrived was accepted: %d", resp.StatusCode)
+	}
+}
+
+// Only a request with a body is clocked. net/http reads ahead on the connection while the
+// handler runs, so a read deadline on a body-less request cancels its context when it
+// expires — which would kill a verify re-hashing a large container on slow storage, or an
+// SSO callback waiting on an identity provider, in the middle of honest work.
+func TestOnlyRequestsWithABodyAreClocked(t *testing.T) {
+	cases := []struct {
+		name          string
+		contentLength int64
+		want          bool
+	}{
+		{"GET with no body", 0, false},
+		{"POST with a body", 42, true},
+		{"chunked body of unknown length", -1, true},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(http.MethodPost, "/api/capsules", nil)
+		r.ContentLength = tc.contentLength
+		if got := requestHasBody(r); got != tc.want {
+			t.Errorf("%s: requestHasBody = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

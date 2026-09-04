@@ -41,14 +41,23 @@ const (
 	capsuleTransferBudget = 15 * time.Minute
 )
 
-// requestReadBudget is how long any one request has to deliver its body. The listener sets
-// no ReadTimeout — a capsule does not fit one — so without this a client trickling a byte
-// a second at a 1 MiB route would hold a goroutine for as long as it liked: MaxBytesReader
-// bounds the bytes, nothing bounded the clock, and IdleTimeout does not apply mid-request.
-// The two capsule routes raise it to capsuleTransferBudget for themselves.
+// defaultReadBudget is how long any one request has to deliver its body, and the value
+// Server.readBudget starts at. The listener sets no ReadTimeout — a capsule does not fit
+// one — so without this a client trickling a byte a second at a 1 MiB route would hold a
+// goroutine for as long as it liked: MaxBytesReader bounds the bytes, nothing bounded the
+// clock, and IdleTimeout does not apply mid-request. The two capsule routes raise it to
+// capsuleTransferBudget for themselves.
+const defaultReadBudget = 30 * time.Second
+
+// requestHasBody reports whether a request has anything left to read. Only those are
+// clocked: setting a read deadline on a body-less request cancels its context when the
+// deadline expires, because net/http reads ahead on the connection while the handler runs
+// and treats that expiry as a dead connection. A handler that legitimately takes minutes —
+// re-hashing a container, waiting on an identity provider — would be cancelled mid-work.
+// A body-less request cannot slowloris anyway: it is already past ReadHeaderTimeout.
 //
-// A variable so a test can shorten it; nothing else writes it.
-var requestReadBudget = 30 * time.Second
+// A chunked body reports -1, which is a body.
+func requestHasBody(r *http.Request) bool { return r.ContentLength != 0 }
 
 // setReadDeadline and setWriteDeadline give one request its own clock. Not every
 // ResponseWriter supports deadlines (httptest.ResponseRecorder does not), and one that

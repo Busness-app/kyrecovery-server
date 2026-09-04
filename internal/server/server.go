@@ -48,6 +48,7 @@ type Server struct {
 	authMgr     *auth.Manager
 	replication *replication.Manager
 	inspector   *diff.Inspector
+	readBudget  time.Duration
 	claimLimit  *rateLimiter
 	loginLimit  *rateLimiter
 	pushLimit   *rateLimiter
@@ -75,6 +76,7 @@ func New(cfg Config, database *db.DB, ledger *audit.Ledger) (*Server, error) {
 		authMgr:     authMgr,
 		replication: replMgr,
 		inspector:   inspector,
+		readBudget:  defaultReadBudget,
 		claimLimit:  newRateLimiter(claimWindow),
 		loginLimit:  newRateLimiter(loginWindow),
 		pushLimit:   newRateLimiter(pushWindow),
@@ -288,9 +290,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
 
-	// Every request delivers its body on a clock. The deposit and download raise their
-	// own budget from here; nothing lowers it.
-	setReadDeadline(w, requestReadBudget)
+	// A request that carries a body delivers it on a clock. The deposit and download raise
+	// their own budget from here; nothing lowers it.
+	if requestHasBody(r) {
+		setReadDeadline(w, s.readBudget)
+	}
 
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		w.Header().Set("Cache-Control", "no-store")

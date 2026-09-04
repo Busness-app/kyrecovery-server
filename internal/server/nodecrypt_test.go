@@ -19,7 +19,9 @@ var allowedSelectors = map[string]map[string]bool{
 	// Parsing and holding the public half is the whole of the server's business with it.
 	"github.com/Busness-app/ky-primitives/recoverykey": {"ParsePublicKey": true, "PublicKey": true},
 	// Reading the unencrypted manifest and knowing how big a container may be.
-	"github.com/Busness-app/ky-primitives/capsule": {"ReadUnverifiedManifest": true, "Manifest": true, "MaxContainerBytes": true},
+	// UnverifiedManifest is what ReadUnverifiedManifest returns; Manifest is what Open and
+	// Seal return, so naming it means holding the output of a decryption.
+	"github.com/Busness-app/ky-primitives/capsule": {"ReadUnverifiedManifest": true, "UnverifiedManifest": true, "MaxContainerBytes": true},
 	"github.com/Busness-app/ky-primitives/shamir":  {},
 	"crypto/hpke": {},
 }
@@ -110,6 +112,10 @@ func checkFile(t *testing.T, file string) {
 		return
 	}
 
+	// Package-qualified selectors only: methods on a returned value, and packages absent
+	// from allowedSelectors, are not policed here. That holds because the two types the
+	// server may hold — UnverifiedManifest and PublicKey — expose no method that opens
+	// anything (PublicKey.HPKE hands back a public key, which seals and cannot unseal).
 	ast.Inspect(f, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
