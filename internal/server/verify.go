@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,19 +20,27 @@ import (
 // writes the outcome to the audit chain. It is the only attestation this store can make:
 // the bytes are what arrived. It says nothing about what is inside them.
 //
-// A missing or unreadable file is not a verification error: it is the strongest possible
-// evidence of corruption. It is flagged the same way a digest mismatch is — the row is
+// A file that is not there is not a verification error: it is the strongest possible
+// evidence of corruption, and is flagged the same way a digest mismatch is — the row is
 // marked corrupt, the reason is logged to the audit chain, and (false, nil) is returned so
 // a sweep does not skip the row forever and an on-demand check does not 500.
+//
+// Every other failure to read is the opposite: a full disk, a dropped mount or a lost
+// permission says nothing about the bytes. Those return an error and leave the row alone,
+// so one bad I/O moment does not get amplified into a store-wide "corrupt" verdict the
+// operator then has to disbelieve.
 func (s *Server) verifyCapsule(ctx context.Context, rec *db.CapsuleRecord, actor string) (bool, error) {
 	f, err := os.Open(rec.FilePath)
 	if err != nil {
-		return s.markCorrupt(ctx, rec, actor, "file missing")
+		if errors.Is(err, fs.ErrNotExist) {
+			return s.markCorrupt(ctx, rec, actor, "file missing")
+		}
+		return false, fmt.Errorf("opening capsule file: %w", err)
 	}
 	defer f.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return s.markCorrupt(ctx, rec, actor, "file unreadable")
+		return false, fmt.Errorf("reading capsule file: %w", err)
 	}
 	valid := hex.EncodeToString(h.Sum(nil)) == rec.Digest
 	if !valid {
@@ -61,8 +72,8 @@ func (s *Server) handleCapsuleVerify(w http.ResponseWriter, r *http.Request, rec
 	writeJSON(w, http.StatusOK, map[string]any{"capsule_id": rec.ID, "digest": rec.Digest, "valid": valid, "checked_at": time.Now().UTC()})
 }
 
-// verifyAll is the daily sweep. It never stops on one bad capsule. The only error path left
-// once verifyCapsule absorbs file-read failures is a DB write failure, which is logged.
+// verifyAll is the daily sweep. It never stops on one bad capsule: an unreadable file or a
+// failed status write is logged and the row is left as it was, and the sweep moves on.
 func (s *Server) verifyAll(ctx context.Context) (checked, corrupt int) {
 	caps, err := s.db.ListCapsules(ctx)
 	if err != nil {
@@ -85,6 +96,7 @@ func (s *Server) verifyAll(ctx context.Context) (checked, corrupt int) {
 func (s *Server) runIntegritySweep(ctx context.Context) {
 	t := time.NewTicker(24 * time.Hour)
 	defer t.Stop()
+	s.verifyAll(ctx) // a restart is exactly when the disk may have changed under us
 	for {
 		select {
 		case <-ctx.Done():

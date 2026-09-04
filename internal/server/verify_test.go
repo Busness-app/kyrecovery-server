@@ -144,3 +144,42 @@ func TestVerifyRecordsTheCallerAsActor(t *testing.T) {
 		t.Fatalf("capsule_verified actor = %q, want the admin caller", actor)
 	}
 }
+
+// A file that cannot be read for any reason other than being gone says nothing about the
+// bytes. A dropped mount or a lost permission must not be laundered into a "corrupt"
+// verdict across the whole store, so the row is left alone and the caller gets an error.
+func TestVerifyOfAnUnreadableFileDoesNotFlagCorrupt(t *testing.T) {
+	srv, cookie, database := newAdminServer(t)
+	k, _ := recoverykey.Generate()
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	raw := sealFor(t, k.Public(), "kynotes")
+	if rec := deposit(srv, token, raw); rec.Code != http.StatusCreated {
+		t.Fatalf("deposit: %d", rec.Code)
+	}
+	caps, _ := database.ListCapsules(t.Context())
+	id, path := caps[0].ID, caps[0].FilePath
+
+	// A directory opens fine and fails on read: an I/O failure that is not absence.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/capsules/"+id+"/verify", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("verify of an unreadable file: %d %s, want 500", rr.Code, rr.Body.String())
+	}
+	after, err := database.GetCapsule(t.Context(), id)
+	if err != nil || after == nil {
+		t.Fatalf("GetCapsule: %v", err)
+	}
+	if after.Status == "corrupt" {
+		t.Fatal("a transient read failure marked the capsule corrupt")
+	}
+}
