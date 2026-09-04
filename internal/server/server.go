@@ -120,6 +120,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/favicon.svg", faviconHandler)
 	s.mux.HandleFunc("/favicon.ico", faviconHandler)
 
+	// The ceremony page generates the recovery private key in the operator's browser.
+	// It is not under /api/, so apiPolicy does not cover it and the session is checked
+	// here; it is also the only page allowed to compile WebAssembly.
+	s.mux.HandleFunc("/admin/ceremony", func(w http.ResponseWriter, r *http.Request) {
+		session, err := s.authMgr.GetSession(r.Context(), r)
+		if err != nil || session == nil || auth.RoleRank(session.Role) < auth.RoleRank(auth.RoleAdmin) {
+			http.Error(w, "admin session required", http.StatusForbidden)
+			return
+		}
+		data, err := staticFS.ReadFile("static/ceremony.html")
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Security-Policy", ceremonyContentSecurityPolicy)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+	})
+
 	// Auth & SSO Routes
 	s.mux.HandleFunc("/api/auth/config", s.handleAuthConfig)
 	s.mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
@@ -169,6 +189,13 @@ func (s *Server) routes() {
 // wires buttons with inline onclick=. Move those to addEventListener and drop it.
 const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline'; " +
 	"style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; " +
+	"form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+// ceremonyContentSecurityPolicy applies to /admin/ceremony alone. That page has to compile
+// a WebAssembly module, which needs 'wasm-unsafe-eval'; in exchange it carries no inline
+// script or style at all, so it is stricter than the dashboard everywhere else.
+const ceremonyContentSecurityPolicy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; " +
+	"style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
 	"form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 // rolePublic marks a route reachable without a session: it is needed to sign in,

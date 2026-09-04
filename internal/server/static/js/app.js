@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadCapsules();
   loadPairing();
   loadCustodians();
+  loadRecoveryKey();
   loadReplication();
   loadAudit();
 
@@ -125,6 +126,25 @@ async function loadCustodians() {
     `).join('');
   } catch (err) {
     console.error('Error fetching custodians:', err);
+  }
+}
+
+// The public half of the ceremony's keypair, if it has been imported yet. The server
+// never has more than this, so this is the whole status the dashboard can show.
+async function loadRecoveryKey() {
+  const el = document.getElementById('recovery-key-status');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/recovery-key');
+    if (res.status === 404) {
+      el.textContent = 'No recovery key \u2014 run the ceremony';
+      return;
+    }
+    if (!res.ok) return;
+    const k = await res.json();
+    el.innerHTML = `Key ID <code>${esc(k.key_id)}</code> &mdash; ${esc(k.threshold)} of ${esc(k.total_shares)} custodian cards, imported by ${esc(k.imported_by)} on ${new Date(k.imported_at).toLocaleString()}`;
+  } catch (err) {
+    console.error('Error fetching recovery key:', err);
   }
 }
 

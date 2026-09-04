@@ -1,0 +1,8 @@
+/* The ceremony page runs under a stricter CSP than the dashboard: no inline styles,
+   so its handful of layout rules live here. */
+.ceremony { max-width: 900px; margin: 40px auto; padding: 0 20px; }
+.ceremony .panel { padding: 20px; margin-bottom: 20px; }
+.ceremony .form-label { display: block; margin-bottom: 12px; }
+.card { padding: 20px; margin-bottom: 20px; border: 1px solid var(--border-color); page-break-inside: avoid; }
+.card .share { font-size: 1.1em; }
+@media print { .no-print, #ceremony-form { display: none; } }
