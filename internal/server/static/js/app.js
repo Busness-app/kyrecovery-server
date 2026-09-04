@@ -687,6 +687,8 @@ function applyReplicationPreset() {
   label('repl-access-key-label', preset === 'sftp' || preset === 'smb' ? 'Username' : 'Access Key ID');
   label('repl-secret-key-label', preset === 'sftp' ? 'Password or PEM Private Key' : preset === 'smb' ? 'Password' : 'Secret Access Key');
   label('repl-prefix-label', preset === 'sftp' || preset === 'smb' ? 'Remote Directory' : 'Prefix / Subdirectory');
+  document.getElementById('repl-secret-key').placeholder = preset === 'sftp' ? 'Password, or paste a PEM private key' : preset === 'smb' ? 'Password' : 'Secret access key';
+  document.getElementById('repl-access-key').placeholder = preset === 'sftp' ? 'user' : preset === 'smb' ? 'user or DOMAIN\\user' : 'Access key';
 
   if (preset === 'local') {
     s3Fields.style.display = 'none';
