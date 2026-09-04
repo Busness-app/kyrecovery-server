@@ -7,7 +7,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/pkg/sftp v1.13.11
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/oauth2 v0.36.0
 	modernc.org/sqlite v1.57.0
 )
