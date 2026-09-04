@@ -10,7 +10,7 @@
   --rule-strong: rgba(160, 176, 196, 0.34);
   --paper: #ede9e0;
   --paper-muted: #a9b2bd;
-  --paper-dim: #77828f;
+  --paper-dim: #939eab; /* 5.7:1 on --ink, 4.9:1 on --ink-raised: AA for body text */
   --brass: #c9a227;
   --brass-ink: #1a1508;
   --brass-wash: rgba(201, 162, 39, 0.14);
@@ -18,7 +18,7 @@
   --ok-wash: rgba(111, 191, 138, 0.14);
   --warn: #d8a657;
   --warn-wash: rgba(216, 166, 87, 0.14);
-  --bad: #d9756a;
+  --bad: #e38b80;
   --bad-wash: rgba(217, 117, 106, 0.14);
 
   --serif: "Charter", "Bitstream Charter", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
@@ -68,9 +68,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* The dashboard wrapper sits between body and main; it must carry the flex
-   chain or the footer floats mid-page on tall screens. */
-#dashboard-view { display: flex; flex-direction: column; flex: 1; }
+/* The dashboard wrapper sits between body and main and must carry the flex
+   chain or the footer floats mid-page. The script shows it with display:flex. */
+#dashboard-view { flex-direction: column; flex: 1; }
 
 :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
 

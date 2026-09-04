@@ -41,6 +41,7 @@ jobs:
           node-version: 22
       - run: scripts/build-wasm.sh && git diff --exit-code -- internal/server/static/wasm
       - run: node scripts/test-wasm.mjs
+      - run: node scripts/check-contrast.mjs
   security:
     runs-on: ubuntu-latest
     steps:

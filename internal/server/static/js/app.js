@@ -133,15 +133,20 @@ async function loadCustodians() {
 // never has more than this, so this is the whole status the dashboard can show.
 async function loadRecoveryKey() {
   const el = document.getElementById('recovery-key-status');
+  // The overview caption states the real quorum, which the ceremony fixes; the
+  // custodian count next to it is a directory and must never be read as one.
+  const quorum = document.getElementById('metric-custodians-sub');
   if (!el) return;
   try {
     const res = await fetch('/api/recovery-key');
     if (res.status === 404) {
       el.textContent = 'No recovery key \u2014 run the ceremony';
+      if (quorum) quorum.textContent = 'No ceremony run yet, so the recovery key cannot be reconstructed.';
       return;
     }
     if (!res.ok) return;
     const k = await res.json();
+    if (quorum) quorum.textContent = `${k.threshold} of ${k.total_shares} custodian cards reconstruct the recovery key.`;
     el.innerHTML = `Key ID <code>${esc(k.key_id)}</code> &mdash; ${esc(k.threshold)} of ${esc(k.total_shares)} custodian cards, imported by ${esc(k.imported_by)} on ${esc(new Date(k.imported_at).toLocaleString())}`;
   } catch (err) {
     console.error('Error fetching recovery key:', err);
@@ -353,7 +358,7 @@ async function loadAuthUser() {
       if (btnChangePass) btnChangePass.style.display = 'inline-flex';
 
       if (loginGateway) loginGateway.style.display = 'none';
-      if (dashboardView) dashboardView.style.display = 'block';
+      if (dashboardView) dashboardView.style.display = 'flex';
 
       // Load protected dashboard data
       loadReadiness();
