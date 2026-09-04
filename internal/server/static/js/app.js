@@ -604,7 +604,7 @@ async function loadReplicationTargets() {
         <td><strong>${esc(t.name)}</strong></td>
         <td><span class="pill-badge">${esc(String(t.type).toUpperCase())}</span></td>
         <td>
-          <code style="font-size: 12px;">${esc(t.type === 'local' ? t.endpoint : (t.bucket + ' (' + t.region + ')'))}</code>
+          <code style="font-size: 12px;">${esc(t.type === 's3' ? (t.bucket + ' (' + t.region + ')') : t.type === 'smb' ? (t.endpoint + '/' + t.bucket) : t.endpoint)}</code>
         </td>
         <td>
           <span class="status-pill ${t.auto_sync ? 'ready' : 'warning'}">
@@ -676,11 +676,31 @@ function applyReplicationPreset() {
   const s3Fields = document.getElementById('repl-s3-fields');
   const endpointLabel = document.getElementById('repl-endpoint-label');
   const endpointInput = document.getElementById('repl-endpoint');
+  const show = (id, on) => { document.getElementById(id).style.display = on ? '' : 'none'; };
+  const label = (id, text) => { document.getElementById(id).textContent = text; };
+
+  show('repl-host-key-group', preset === 'sftp');
+  show('repl-bucket-group', preset !== 'sftp');
+  show('repl-region-group', preset !== 'sftp' && preset !== 'smb');
+  label('repl-bucket-label', preset === 'smb' ? 'Share Name' : 'Bucket Name');
+  label('repl-access-key-label', preset === 'sftp' || preset === 'smb' ? 'Username' : 'Access Key ID');
+  label('repl-secret-key-label', preset === 'sftp' ? 'Password or PEM Private Key' : preset === 'smb' ? 'Password' : 'Secret Access Key');
+  label('repl-prefix-label', preset === 'sftp' || preset === 'smb' ? 'Remote Directory' : 'Prefix / Subdirectory');
 
   if (preset === 'local') {
     s3Fields.style.display = 'none';
     endpointLabel.textContent = 'Destination Local Directory / Mount Path';
     endpointInput.placeholder = '/mnt/cold-storage/kyrecovery-vault';
+  } else if (preset === 'sftp') {
+    s3Fields.style.display = 'block';
+    endpointLabel.textContent = 'SSH Host (host or host:port)';
+    endpointInput.placeholder = 'nas.lan:22';
+  } else if (preset === 'smb') {
+    s3Fields.style.display = 'block';
+    endpointLabel.textContent = 'SMB Host (host or host:port)';
+    endpointInput.placeholder = 'nas.lan';
+    document.getElementById('repl-bucket').placeholder = 'backups';
+    document.getElementById('repl-access-key').placeholder = 'user or DOMAIN\\user';
   } else {
     s3Fields.style.display = 'block';
     endpointLabel.textContent = 'S3 Endpoint URL';
@@ -699,7 +719,7 @@ function applyReplicationPreset() {
 
 function getReplicationTargetPayload() {
   const preset = document.getElementById('repl-preset').value;
-  const type = preset === 'local' ? 'local' : 's3';
+  const type = ['local', 'sftp', 'smb'].includes(preset) ? preset : 's3';
 
   return {
     name: document.getElementById('repl-name').value.trim(),
@@ -710,6 +730,7 @@ function getReplicationTargetPayload() {
     access_key: document.getElementById('repl-access-key') ? document.getElementById('repl-access-key').value.trim() : '',
     secret_key: document.getElementById('repl-secret-key') ? document.getElementById('repl-secret-key').value.trim() : '',
     prefix: document.getElementById('repl-prefix').value.trim() || 'capsules/',
+    host_key: document.getElementById('repl-host-key').value.trim(),
     auto_sync: document.getElementById('repl-auto-sync').checked
   };
 }
@@ -733,6 +754,11 @@ async function testReplicationConnection() {
     if (data.success) {
       statusBox.style.color = 'var(--accent-green)';
       statusBox.textContent = '✓ ' + data.message;
+    } else if (data.host_key) {
+      // Not trusted yet: show the fingerprint and let the operator confirm it.
+      document.getElementById('repl-host-key').value = data.host_key;
+      statusBox.style.color = 'var(--accent-yellow, #e0b040)';
+      statusBox.textContent = 'Server host key ' + data.host_key + ' filled in. Check it matches the server (ssh-keygen -lf) and test again.';
     } else {
       statusBox.style.color = 'var(--accent-red)';
       statusBox.textContent = '✗ ' + (data.error || 'Connection failed');

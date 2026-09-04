@@ -385,6 +385,8 @@
               <option value="s3">AWS S3 / S3-Compatible</option>
               <option value="r2">Cloudflare R2 Object Storage</option>
               <option value="minio">MinIO Self-Hosted S3</option>
+              <option value="sftp">SFTP (SSH) Server</option>
+              <option value="smb">SMB / Windows Share</option>
               <option value="local">Local Directory / NFS Mount</option>
             </select>
           </div>
@@ -397,25 +399,29 @@
             <input id="repl-endpoint" class="form-input" type="text" placeholder="https://<account-id>.r2.cloudflarestorage.com" required>
           </div>
           <div id="repl-s3-fields">
-            <div class="form-group">
-              <label class="form-label">Bucket Name</label>
+            <div class="form-group" id="repl-bucket-group">
+              <label class="form-label" id="repl-bucket-label">Bucket Name</label>
               <input id="repl-bucket" class="form-input" type="text" placeholder="kyrecovery-offsite">
             </div>
-            <div class="form-group">
+            <div class="form-group" id="repl-region-group">
               <label class="form-label">Region</label>
               <input id="repl-region" class="form-input" type="text" placeholder="auto or us-east-1" value="auto">
             </div>
             <div class="form-group">
-              <label class="form-label">Access Key ID</label>
+              <label class="form-label" id="repl-access-key-label">Access Key ID</label>
               <input id="repl-access-key" class="form-input" type="text" placeholder="Access key">
             </div>
             <div class="form-group">
-              <label class="form-label">Secret Access Key</label>
+              <label class="form-label" id="repl-secret-key-label">Secret Access Key</label>
               <input id="repl-secret-key" class="form-input" type="password" placeholder="Secret access key">
             </div>
           </div>
+          <div class="form-group" id="repl-host-key-group" style="display: none;">
+            <label class="form-label">Server Host Key (SHA256 fingerprint)</label>
+            <input id="repl-host-key" class="form-input" type="text" placeholder="Press Test Connection to fetch, then confirm it matches the server">
+          </div>
           <div class="form-group">
-            <label class="form-label">Prefix / Subdirectory</label>
+            <label class="form-label" id="repl-prefix-label">Prefix / Subdirectory</label>
             <input id="repl-prefix" class="form-input" type="text" placeholder="capsules/" value="capsules/">
           </div>
           <div class="form-group" style="display: flex; align-items: center; gap: 8px;">

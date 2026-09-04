@@ -87,9 +87,21 @@ body = a kycap/3 container sealed to the pinned public key.
 
 `pkg/client` is the Go SDK for both halves: `ClaimPairing` and `Client.Deposit`.
 
-A stored capsule is replicated to every auto-sync offsite target (S3-compatible
-buckets or a local mount) configured under `/api/replication/targets`. The bytes
-are as opaque there as they are here.
+A stored capsule is replicated to every auto-sync offsite target configured
+under `/api/replication/targets`. The bytes are as opaque there as they are
+here. Target types:
+
+- `s3`: any S3-compatible bucket, signed with SigV4.
+- `sftp`: an SSH server. The secret is a password or a PEM private key. The
+  server's host key is pinned: Test Connection reports the SHA256 fingerprint
+  of an unknown server, the operator confirms it against `ssh-keygen -lf` and
+  saves it, and a later mismatch refuses to connect. No pin, no connection.
+- `smb`: a Windows or Samba share over SMB 2 or 3, never SMB1. The user may be
+  `DOMAIN\user`. Signing is on; encryption follows the share's requirement.
+- `local`: a directory, typically an NFS or SMB mount managed by the host.
+
+Credentials for every type are sealed with `secret.key` before they reach the
+database.
 
 ## Integrity
 

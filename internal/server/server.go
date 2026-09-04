@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -1159,10 +1160,14 @@ func (s *Server) handleReplicationTargetTest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := s.replication.TestTarget(r.Context(), target); err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": false,
-			"error":   err.Error(),
-		})
+		resp := map[string]interface{}{"success": false, "error": err.Error()}
+		// An unpinned SFTP server is not a failure yet: hand back the fingerprint
+		// so the operator can pin it on purpose rather than trust it blindly.
+		var unknown *replication.UnknownHostKeyError
+		if errors.As(err, &unknown) {
+			resp["host_key"] = unknown.Fingerprint
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{

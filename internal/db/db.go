@@ -132,6 +132,7 @@ type ReplicationTargetRecord struct {
 	AccessKey  string     `json:"access_key"`
 	SecretKey  string     `json:"secret_key,omitempty"`
 	Prefix     string     `json:"prefix"`
+	HostKey    string     `json:"host_key"` // sftp: pinned SHA256 fingerprint
 	AutoSync   bool       `json:"auto_sync"`
 	Status     string     `json:"status"` // "active", "disabled", "error"
 	LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
@@ -298,6 +299,7 @@ func (d *DB) migrate() error {
 		access_key TEXT NOT NULL,
 		secret_key TEXT NOT NULL,
 		prefix TEXT NOT NULL DEFAULT 'capsules/',
+		host_key TEXT NOT NULL DEFAULT '',
 		auto_sync INTEGER NOT NULL DEFAULT 1,
 		status TEXT NOT NULL DEFAULT 'active',
 		last_sync_at DATETIME,
@@ -334,7 +336,29 @@ func (d *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_repl_logs_target ON replication_logs(target_id);
 	`
 
-	_, err := d.conn.Exec(schema)
+	if _, err := d.conn.Exec(schema); err != nil {
+		return err
+	}
+	return d.addColumn("replication_targets", "host_key", "TEXT NOT NULL DEFAULT ''")
+}
+
+// addColumn adds a column to a table created by an older schema, once.
+func (d *DB) addColumn(table, column, def string) error {
+	rows, err := d.conn.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = d.conn.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, def))
 	return err
 }
 
@@ -723,12 +747,12 @@ func (d *DB) DeleteSession(ctx context.Context, id string) error {
 
 // InsertReplicationTarget creates or updates an offsite replication target.
 func (d *DB) InsertReplicationTarget(ctx context.Context, t ReplicationTargetRecord) error {
-	q := `INSERT INTO replication_targets (id, name, type, endpoint, bucket, region, access_key, secret_key, prefix, auto_sync, status, last_sync_at, created_at)
-	      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	q := `INSERT INTO replication_targets (id, name, type, endpoint, bucket, region, access_key, secret_key, prefix, host_key, auto_sync, status, last_sync_at, created_at)
+	      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	      ON CONFLICT(id) DO UPDATE SET
 	      name=excluded.name, type=excluded.type, endpoint=excluded.endpoint, bucket=excluded.bucket,
 	      region=excluded.region, access_key=excluded.access_key, secret_key=excluded.secret_key,
-	      prefix=excluded.prefix, auto_sync=excluded.auto_sync, status=excluded.status`
+	      prefix=excluded.prefix, host_key=excluded.host_key, auto_sync=excluded.auto_sync, status=excluded.status`
 	autoSyncInt := 0
 	if t.AutoSync {
 		autoSyncInt = 1
@@ -737,19 +761,19 @@ func (d *DB) InsertReplicationTarget(ctx context.Context, t ReplicationTargetRec
 	if err != nil {
 		return fmt.Errorf("failed sealing replication secret key: %w", err)
 	}
-	_, err = d.conn.ExecContext(ctx, q, t.ID, t.Name, t.Type, t.Endpoint, t.Bucket, t.Region, t.AccessKey, sealedSecret, t.Prefix, autoSyncInt, t.Status, t.LastSyncAt, t.CreatedAt.UTC())
+	_, err = d.conn.ExecContext(ctx, q, t.ID, t.Name, t.Type, t.Endpoint, t.Bucket, t.Region, t.AccessKey, sealedSecret, t.Prefix, t.HostKey, autoSyncInt, t.Status, t.LastSyncAt, t.CreatedAt.UTC())
 	return err
 }
 
 // GetReplicationTarget returns a target by ID.
 func (d *DB) GetReplicationTarget(ctx context.Context, id string) (*ReplicationTargetRecord, error) {
-	q := `SELECT id, name, type, endpoint, bucket, region, access_key, secret_key, prefix, auto_sync, status, last_sync_at, created_at
+	q := `SELECT id, name, type, endpoint, bucket, region, access_key, secret_key, prefix, host_key, auto_sync, status, last_sync_at, created_at
 	      FROM replication_targets WHERE id = ?`
 	row := d.conn.QueryRowContext(ctx, q, id)
 	var t ReplicationTargetRecord
 	var autoSyncInt int
 	var err error
-	if err = row.Scan(&t.ID, &t.Name, &t.Type, &t.Endpoint, &t.Bucket, &t.Region, &t.AccessKey, &t.SecretKey, &t.Prefix, &autoSyncInt, &t.Status, &t.LastSyncAt, &t.CreatedAt); err != nil {
+	if err = row.Scan(&t.ID, &t.Name, &t.Type, &t.Endpoint, &t.Bucket, &t.Region, &t.AccessKey, &t.SecretKey, &t.Prefix, &t.HostKey, &autoSyncInt, &t.Status, &t.LastSyncAt, &t.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -764,7 +788,7 @@ func (d *DB) GetReplicationTarget(ctx context.Context, id string) (*ReplicationT
 
 // ListReplicationTargets returns all configured replication targets.
 func (d *DB) ListReplicationTargets(ctx context.Context) ([]ReplicationTargetRecord, error) {
-	q := `SELECT id, name, type, endpoint, bucket, region, access_key, secret_key, prefix, auto_sync, status, last_sync_at, created_at
+	q := `SELECT id, name, type, endpoint, bucket, region, access_key, secret_key, prefix, host_key, auto_sync, status, last_sync_at, created_at
 	      FROM replication_targets ORDER BY created_at ASC`
 	rows, err := d.conn.QueryContext(ctx, q)
 	if err != nil {
@@ -776,7 +800,7 @@ func (d *DB) ListReplicationTargets(ctx context.Context) ([]ReplicationTargetRec
 	for rows.Next() {
 		var t ReplicationTargetRecord
 		var autoSyncInt int
-		if err := rows.Scan(&t.ID, &t.Name, &t.Type, &t.Endpoint, &t.Bucket, &t.Region, &t.AccessKey, &t.SecretKey, &t.Prefix, &autoSyncInt, &t.Status, &t.LastSyncAt, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Type, &t.Endpoint, &t.Bucket, &t.Region, &t.AccessKey, &t.SecretKey, &t.Prefix, &t.HostKey, &autoSyncInt, &t.Status, &t.LastSyncAt, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		t.AutoSync = autoSyncInt == 1

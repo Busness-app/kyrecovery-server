@@ -5,6 +5,8 @@ go 1.26.6
 require (
 	github.com/Busness-app/ky-primitives v0.4.1
 	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/hirochachacha/go-smb2 v1.1.0
+	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.55.0
 	golang.org/x/oauth2 v0.36.0
 	modernc.org/sqlite v1.57.0
@@ -12,8 +14,10 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/geoffgarside/ber v1.1.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
