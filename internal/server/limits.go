@@ -2,27 +2,19 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
-// Request body ceilings. Every API route is bounded; backup pushes get a larger
-// allowance because they carry file contents, tunable for services with big state.
-const (
-	maxAPIBodyBytes           = 1 << 20  // 1 MiB
-	defaultMaxBackupPushBytes = 64 << 20 // 64 MiB of base64 payload
-	EnvMaxBackupPushBytes     = "KYRECOVERY_MAX_BACKUP_BYTES"
-	maxSharesPerCapsule       = 255 // GF(2^8) ceiling in crypto.Split
-)
+// maxAPIBodyBytes bounds every API route. The deposit route, which carries a
+// sealed capsule, gets its own ceiling when it lands.
+const maxAPIBodyBytes = 1 << 20 // 1 MiB
 
 // Login and backup push throttles.
 const (
@@ -33,9 +25,8 @@ const (
 	pushWindow     = 15 * time.Minute
 	pushesPerToken = 60
 
-	// A push is held in memory several times over — base64 body, decoded files,
-	// tar buffer, ciphertext — so the ceiling that matters is how many run at
-	// once, not how many run per quarter hour.
+	// A deposit is held in memory more than once, so the ceiling that matters is
+	// how many run at once, not how many run per quarter hour.
 	maxConcurrentPushes = 4
 
 	// maxPairingTTL caps how long a six-digit code stays guessable.
@@ -53,30 +44,7 @@ func validServiceName(name string) bool {
 
 // bodyLimit returns the maximum request body accepted on an API path.
 func bodyLimit(path string) int64 {
-	if path == "/api/backup/push" || path == "/api/v1/backup/push" {
-		return maxBackupPushBytes()
-	}
 	return maxAPIBodyBytes
-}
-
-func maxBackupPushBytes() int64 {
-	if v := os.Getenv(EnvMaxBackupPushBytes); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultMaxBackupPushBytes
-}
-
-// newCapsuleID returns a collision-free capsule ID. The timestamp keeps IDs
-// readable and roughly ordered; the random suffix is what makes them unique, so
-// two pushes in the same second can never name the same capsule.
-func newCapsuleID(serviceName string) (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("failed generating capsule ID: %w", err)
-	}
-	return fmt.Sprintf("cap-%s-%d-%s", serviceName, time.Now().UTC().Unix(), hex.EncodeToString(b)), nil
 }
 
 // publishCapsule durably stores a capsule and its database record. The bytes are

@@ -24,8 +24,6 @@ func TestRequiredRolePolicy(t *testing.T) {
 		{http.MethodPost, "/api/auth/logout", rolePublic},
 		{http.MethodGet, "/api/auth/sso/config", rolePublic},
 		{http.MethodPost, "/api/pairing/claim", rolePublic},
-		{http.MethodPost, "/api/backup/push", rolePublic},
-		{http.MethodPost, "/api/v1/backup/push", rolePublic},
 
 		// Read-only.
 		{http.MethodPost, "/api/auth/password", auth.RoleViewer},
@@ -35,24 +33,15 @@ func TestRequiredRolePolicy(t *testing.T) {
 		{http.MethodGet, "/api/capsules/timeline", auth.RoleViewer},
 		{http.MethodGet, "/api/capsules/cap-abc", auth.RoleViewer},
 		{http.MethodGet, "/api/custodians", auth.RoleViewer},
-		{http.MethodGet, "/api/drills", auth.RoleViewer},
 		{http.MethodGet, "/api/audit", auth.RoleViewer},
 		{http.MethodGet, "/api/pairing/list", auth.RoleViewer},
-		{http.MethodGet, "/api/ceremonies", auth.RoleViewer},
 		{http.MethodGet, "/api/replication/targets", auth.RoleViewer},
 		{http.MethodGet, "/api/replication/logs", auth.RoleViewer},
 
 		// Recovery work.
 		{http.MethodGet, "/api/capsules/cap-abc/download", auth.RoleOperator},
-		{http.MethodGet, "/api/capsules/cap-abc/export-kit", auth.RoleOperator},
-		{http.MethodPost, "/api/capsules/capture", auth.RoleOperator},
 		{http.MethodPost, "/api/custodians", auth.RoleOperator},
-		{http.MethodPost, "/api/drills/run", auth.RoleOperator},
 		{http.MethodPost, "/api/audit/verify", auth.RoleOperator},
-		{http.MethodPost, "/api/ceremonies/create", auth.RoleOperator},
-		{http.MethodPost, "/api/ceremonies/submit", auth.RoleOperator},
-		{http.MethodPost, "/api/ceremonies/execute", auth.RoleOperator},
-		{http.MethodPost, "/api/ceremonies/cancel", auth.RoleOperator},
 		{http.MethodPost, "/api/replication/sync", auth.RoleOperator},
 
 		// Trust configuration.
@@ -64,8 +53,13 @@ func TestRequiredRolePolicy(t *testing.T) {
 		{http.MethodPost, "/api/replication/targets/test", auth.RoleAdmin},
 		{http.MethodDelete, "/api/replication/targets/target-1", auth.RoleAdmin},
 
-		// Unknown routes are closed.
+		// Unknown routes are closed — including the deleted decrypting ones.
 		{http.MethodPost, "/api/something/new", auth.RoleAdmin},
+		{http.MethodPost, "/api/backup/push", auth.RoleAdmin},
+		{http.MethodPost, "/api/v1/backup/push", auth.RoleAdmin},
+		{http.MethodPost, "/api/capsules/capture", auth.RoleAdmin},
+		{http.MethodPost, "/api/drills/run", auth.RoleAdmin},
+		{http.MethodPost, "/api/ceremonies/execute", auth.RoleAdmin},
 	}
 
 	for _, tc := range cases {
@@ -90,11 +84,10 @@ func TestRoleRankOrdering(t *testing.T) {
 }
 
 func TestBodyLimits(t *testing.T) {
-	if bodyLimit("/api/capsules/capture") != maxAPIBodyBytes {
-		t.Fatal("ordinary API routes must use the small body limit")
-	}
-	if bodyLimit("/api/backup/push") != maxBackupPushBytes() {
-		t.Fatal("backup push must use the backup body limit")
+	for _, path := range []string{"/api/capsules", "/api/pairing/claim", "/api/custodians"} {
+		if bodyLimit(path) != maxAPIBodyBytes {
+			t.Fatalf("%s must use the small body limit", path)
+		}
 	}
 }
 

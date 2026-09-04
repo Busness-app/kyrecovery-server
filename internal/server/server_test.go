@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,7 +16,6 @@ import (
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 	"github.com/Busness-app/kyrecovery-server/internal/pairing"
 	"github.com/Busness-app/kyrecovery-server/internal/server"
-	"github.com/Busness-app/kyrecovery-server/pkg/client"
 )
 
 func TestServerEndpoints(t *testing.T) {
@@ -31,10 +32,15 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("EnsureAdminUser failed: %v", err)
 	}
 
-	srv, err := server.New(server.Config{Port: 8095, DataDir: t.TempDir()}, database, ledger)
+	dataDir := t.TempDir()
+	srv, err := server.New(server.Config{Port: 8095, DataDir: dataDir}, database, ledger)
 	if err != nil {
 		t.Fatalf("server.New failed: %v", err)
 	}
+
+	// The store holds sealed bytes it cannot read, so the tests below deposit
+	// records directly rather than through a handler that would have to decrypt.
+	baseID, targetID := seedCapsule(t, database, dataDir, "kysignon", "hash-a"), seedCapsule(t, database, dataDir, "kysignon", "hash-b")
 
 	// 0a. Test GET /favicon.svg & /favicon.ico
 	favReq := httptest.NewRequest(http.MethodGet, "/favicon.svg", nil)
@@ -85,45 +91,6 @@ func TestServerEndpoints(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/custodians expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// 3. Test POST /api/capsules/capture
-	capBody := []byte(`{"service_name":"kysignon","threshold":2,"total_shares":3}`)
-	req = httptest.NewRequest(http.MethodPost, "/api/capsules/capture", bytes.NewReader(capBody))
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/capsules/capture expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var captureResp struct {
-		Capsule db.CapsuleRecord `json:"capsule"`
-		Shares  []struct {
-			Index    byte   `json:"index"`
-			ValueHex string `json:"value_hex"`
-		} `json:"shares"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &captureResp); err != nil {
-		t.Fatalf("failed decoding capture response: %v", err)
-	}
-	if len(captureResp.Shares) != 3 {
-		t.Fatalf("expected 3 shares, got %d", len(captureResp.Shares))
-	}
-
-	// 4. Test POST /api/drills/run
-	share1 := fmtShare(captureResp.Shares[0].Index, captureResp.Shares[0].ValueHex)
-	share2 := fmtShare(captureResp.Shares[1].Index, captureResp.Shares[1].ValueHex)
-	drillReqBody, _ := json.Marshal(map[string]interface{}{
-		"capsule_id": captureResp.Capsule.ID,
-		"shares":     []string{share1, share2},
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/drills/run", bytes.NewReader(drillReqBody))
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/drills/run expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// 5. Test POST /api/audit/verify
@@ -182,45 +149,6 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("failed parsing claim resp: %v", err)
 	}
 
-	// 8. Test POST /api/backup/push (Self-Declared Backup from paired product)
-	backupBody, _ := json.Marshal(map[string]interface{}{
-		"service_name": "kynotes",
-		"app_name":     "KyNotes Server Primary",
-		"app_version":  "v1.5.0",
-		"threshold":    2,
-		"total_shares": 3,
-		"dependencies": []map[string]interface{}{
-			{"name": "PORT_8088", "type": "port", "required": true, "description": "Notes port"},
-		},
-		"verify_recipe": map[string]interface{}{
-			"check_sqlite_databases": true,
-			"validate_json_files":    true,
-		},
-		"files": map[string]string{
-			"data/notes.db":   "bW9jay1kYXRhYmFzZS1jb250ZW50LTEyMzQ1", // base64
-			"config/app.json": "eyJzZXJ2aWNlIjogImt5bm90ZXMifQ==",
-		},
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/backup/push", bytes.NewReader(backupBody))
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", claimResp.APIToken))
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/backup/push expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Decode through the published SDK type so the wire contract stays in sync with pkg/client.
-	var pushResp client.PushResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &pushResp); err != nil || pushResp.Status != "ingested" {
-		t.Fatalf("failed parsing backup push response: %+v", pushResp)
-	}
-	if pushResp.CapsuleID == "" || pushResp.ServiceName != "kynotes" || pushResp.SizeBytes <= 0 {
-		t.Fatalf("backup push response missing capsule fields: %+v", pushResp)
-	}
-	if pushResp.DrillSummary == nil {
-		t.Fatalf("backup push response missing drill_summary: %s", rec.Body.String())
-	}
-
 	// 9. Test GET /api/pairing/list
 	req = httptest.NewRequest(http.MethodGet, "/api/pairing/list", nil)
 	req.AddCookie(sessionCookie)
@@ -272,84 +200,6 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("GET /api/auth/sso/config expected 200, got %d", rec.Code)
 	}
 
-	// 14. Test POST /api/ceremonies/create
-	ceremonyCreateBody, _ := json.Marshal(map[string]interface{}{
-		"capsule_id":  captureResp.Capsule.ID,
-		"purpose":     "Interactive Quorum Drill",
-		"ttl_minutes": 30,
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/ceremonies/create", bytes.NewReader(ceremonyCreateBody))
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/ceremonies/create expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var cerSess struct {
-		ID        string `json:"id"`
-		Status    string `json:"status"`
-		Threshold int    `json:"threshold"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &cerSess); err != nil || cerSess.ID == "" {
-		t.Fatalf("failed decoding ceremony response: %v", err)
-	}
-
-	// 15. Test POST /api/ceremonies/submit (Custodian 1)
-	sub1Body, _ := json.Marshal(map[string]string{
-		"session_id":     cerSess.ID,
-		"custodian_name": "Alice Custodian",
-		"share":          share1,
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/ceremonies/submit", bytes.NewReader(sub1Body))
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/ceremonies/submit 1 expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// 16. Test POST /api/ceremonies/submit (Custodian 2 -> Quorum Reached)
-	sub2Body, _ := json.Marshal(map[string]string{
-		"session_id":     cerSess.ID,
-		"custodian_name": "Bob Custodian",
-		"share":          share2,
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/ceremonies/submit", bytes.NewReader(sub2Body))
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/ceremonies/submit 2 expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var sub2Resp struct {
-		Status string `json:"status"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &sub2Resp)
-	if sub2Resp.Status != "quorum_reached" {
-		t.Fatalf("expected quorum_reached, got %s", sub2Resp.Status)
-	}
-
-	// 17. Test POST /api/ceremonies/execute
-	execBody, _ := json.Marshal(map[string]string{"session_id": cerSess.ID})
-	req = httptest.NewRequest(http.MethodPost, "/api/ceremonies/execute", bytes.NewReader(execBody))
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/ceremonies/execute expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// 18. Test GET /api/ceremonies
-	req = httptest.NewRequest(http.MethodGet, "/api/ceremonies", nil)
-	req.AddCookie(sessionCookie)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/ceremonies expected 200, got %d", rec.Code)
-	}
-
 	// 19. Test POST /api/replication/targets (Add Local Target)
 	localVaultDir := t.TempDir()
 	targetBody, _ := json.Marshal(map[string]interface{}{
@@ -387,7 +237,7 @@ func TestServerEndpoints(t *testing.T) {
 
 	// 22. Test POST /api/replication/sync
 	syncBody, _ := json.Marshal(map[string]string{
-		"capsule_id": captureResp.Capsule.ID,
+		"capsule_id": baseID,
 		"target_id":  "target-vault-01",
 	})
 	req = httptest.NewRequest(http.MethodPost, "/api/replication/sync", bytes.NewReader(syncBody))
@@ -408,7 +258,7 @@ func TestServerEndpoints(t *testing.T) {
 	}
 
 	// 24. Test GET /api/capsules/diff
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/capsules/diff?base=%s&target=%s", captureResp.Capsule.ID, pushResp.CapsuleID), nil)
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/capsules/diff?base=%s&target=%s", baseID, targetID), nil)
 	req.AddCookie(sessionCookie)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -448,8 +298,23 @@ func TestServerEndpoints(t *testing.T) {
 	}
 }
 
-func fmtShare(idx byte, valHex string) string {
-	return fmt.Sprintf("%d-%s", idx, valHex)
+// seedCapsule records a deposited capsule and its file, returning the capsule ID.
+func seedCapsule(t *testing.T, database *db.DB, dataDir, service, payloadHash string) string {
+	t.Helper()
+	id := fmt.Sprintf("cap-%s-%s", service, payloadHash)
+	path := filepath.Join(dataDir, "capsules", id+".kycap")
+	if err := os.WriteFile(path, []byte("sealed-"+payloadHash), 0600); err != nil {
+		t.Fatalf("writing capsule file failed: %v", err)
+	}
+	rec := db.CapsuleRecord{
+		ID: id, ServiceName: service, FilePath: path, SizeBytes: 16,
+		PayloadHash: payloadHash, Threshold: 2, TotalShares: 3,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	if err := database.InsertCapsule(t.Context(), rec); err != nil {
+		t.Fatalf("InsertCapsule failed: %v", err)
+	}
+	return id
 }
 
 // Unauthenticated claim attempts are capped per source address.

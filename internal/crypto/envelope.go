@@ -31,11 +31,6 @@ func GenerateRandomBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// GenerateMasterKey generates a new 256-bit AES encryption key.
-func GenerateMasterKey() ([]byte, error) {
-	return GenerateRandomBytes(KeyLength)
-}
-
 // DeriveKeyFromPassphrase derives a 256-bit key from a passphrase and salt using Argon2id.
 func DeriveKeyFromPassphrase(passphrase string, salt []byte) ([]byte, error) {
 	if len(passphrase) == 0 {

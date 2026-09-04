@@ -75,7 +75,6 @@
     <button class="tab-btn" data-tab="tab-pairing">Paired Products</button>
     <button class="tab-btn" data-tab="tab-custodians">Custodians & Quorum</button>
     <button class="tab-btn" data-tab="tab-replication">Offsite Replication</button>
-    <button class="tab-btn" data-tab="tab-drills">Restore Drills</button>
     <button class="tab-btn" data-tab="tab-audit">Audit Ledger</button>
   </nav>
 
@@ -91,11 +90,6 @@
           <div class="metric-sub">Verified restore status</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label">Last Drill RTO</div>
-          <div id="metric-rto" class="metric-value">--</div>
-          <div class="metric-sub">Recovery Time Objective</div>
-        </div>
-        <div class="metric-card">
           <div class="metric-label">Encrypted Capsules</div>
           <div id="metric-capsules" class="metric-value">--</div>
           <div class="metric-sub">Ready for cold recovery</div>
@@ -108,18 +102,10 @@
       </div>
 
       <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title">Latest Restore Verification</div>
-          <button class="btn btn-primary btn-sm" onclick="openCaptureModal()">+ Capture New Capsule</button>
-        </div>
         <div class="panel-body">
-          <p style="margin-bottom: 12px; color: var(--text-muted); font-size: 13px;">
-            KyRecovery regularly executes automated cold-restore drills in disposable, sandboxed scratch environments to guarantee data integrity, private key validity, and dependencies without exposing confidential records.
+          <p style="color: var(--text-muted); font-size: 13px;">
+            KyRecovery is a blind store. Products seal their own backup capsules to the suite recovery public key before deposit, so nothing here can read what it holds — and a stolen copy of this server yields no plaintext.
           </p>
-          <div style="display: flex; gap: 24px; font-family: var(--font-mono); font-size: 13px;">
-            <div>Last Verification: <strong id="last-drill-time" style="color: #fff;">Never</strong></div>
-            <div>Status: <strong id="last-drill-status">N/A</strong></div>
-          </div>
         </div>
       </div>
     </div>
@@ -131,7 +117,6 @@
           <div class="panel-title">Encrypted Recovery Capsules</div>
           <div style="display: flex; gap: 8px;">
             <button class="btn btn-secondary btn-sm" onclick="openDiffModal()">🔍 Compare & Diff Versions</button>
-            <button class="btn btn-primary btn-sm" onclick="openCaptureModal()">+ Capture Capsule</button>
           </div>
         </div>
         <div style="overflow-x: auto;">
@@ -143,7 +128,7 @@
                 <th>Quorum Policy</th>
                 <th>Size</th>
                 <th>Payload Hash</th>
-                <th>Captured At</th>
+                <th>Deposited At</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -163,7 +148,7 @@
           <button class="btn btn-primary btn-sm" onclick="openPairingGenModal()">+ Generate Pairing Code</button>
         </div>
         <div style="padding: 16px 20px; background: rgba(77, 238, 234, 0.05); border-bottom: 1px solid var(--border-color); font-size: 13px;">
-          <strong>⚡ Zero-Code Automated Connector</strong>: Enter a pairing code into any KySecurity product or Business.app service. The product self-declares its databases, configurations, and verification recipes, and KyRecovery automatically ingests and drill-verifies backups without server modifications.
+          <strong>⚡ Zero-Code Automated Connector</strong>: Enter a pairing code into any KySecurity product or Business.app service. The product seals each backup to the suite recovery public key and deposits the sealed capsule here; this server never sees the contents.
         </div>
         <div style="overflow-x: auto;">
           <table class="data-table">
@@ -203,35 +188,6 @@
               </tr>
             </thead>
             <tbody id="custodians-table-body">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Quorum Ceremonies Panel -->
-      <div class="panel" style="margin-top: 24px;">
-        <div class="panel-header">
-          <div class="panel-title">Interactive Quorum Ceremonies (Multi-Party Key Gathering)</div>
-          <button class="btn btn-primary btn-sm" onclick="openCeremonyCreateModal()">+ Initiate Recovery Ceremony</button>
-        </div>
-        <div style="padding: 16px 20px; background: rgba(77, 238, 234, 0.05); border-bottom: 1px solid var(--border-color); font-size: 13px;">
-          <strong>🛡️ Zero-Knowledge Multi-Party Quorum</strong>: Initiates a ceremony where individual custodians can contribute their Shamir key shares asynchronously. As soon as the required quorum $M$-of-$N$ is satisfied, the ceremony enables automated restore drills or disaster recovery execution, followed by instant cryptographic in-memory wiping.
-        </div>
-        <div style="overflow-x: auto;">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Ceremony ID / Purpose</th>
-                <th>Target Capsule</th>
-                <th>Quorum Progress</th>
-                <th>Status</th>
-                <th>Contributors</th>
-                <th>Expires</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="ceremonies-table-body">
               <!-- Dynamically populated -->
             </tbody>
           </table>
@@ -294,32 +250,6 @@
       </div>
     </div>
 
-    <!-- Tab 4: Drills -->
-    <div id="tab-drills" class="tab-content">
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title">Restore Drill Verification History</div>
-        </div>
-        <div style="overflow-x: auto;">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Drill ID</th>
-                <th>Capsule ID</th>
-                <th>Service</th>
-                <th>Result</th>
-                <th>RTO</th>
-                <th>Completed At</th>
-              </tr>
-            </thead>
-            <tbody id="drills-table-body">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
     <!-- Tab 5: Audit -->
     <div id="tab-audit" class="tab-content">
       <div class="panel">
@@ -351,62 +281,6 @@
     </div>
 
   </main>
-
-  <!-- Capture Modal -->
-  <div id="capture-modal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="panel-title">Capture Encrypted Capsule</div>
-        <button class="btn btn-secondary btn-sm" onclick="closeCaptureModal()">✕</button>
-      </div>
-      <form onsubmit="submitCapture(event)">
-        <div class="modal-body">
-          <div class="form-group">
-            <label class="form-label">Target KySecurity Service</label>
-            <select id="capture-service" class="form-select">
-              <option value="kysignon">KySignOn (SSO / Identity Authority)</option>
-              <option value="kypassword">KyPassword (Vault Server / KDBX v4)</option>
-              <option value="generic">Generic Service / Custom Recipe (JSON, SQLite, Certs)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Custodian Quorum Threshold (M)</label>
-            <input id="capture-threshold" class="form-input" type="number" min="2" max="10" value="2" required>
-            <div class="metric-sub">Minimum number of shares required to decrypt capsule</div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Total Custodian Shares (N)</label>
-            <input id="capture-shares" class="form-input" type="number" min="2" max="10" value="3" required>
-            <div class="metric-sub">Total number of Shamir secret shares to generate</div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" onclick="closeCaptureModal()">Cancel</button>
-          <button type="submit" id="btn-capture-submit" class="btn btn-primary">Capture Capsule</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <!-- Shares Display Modal -->
-  <div id="shares-modal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="panel-title">Capsule Created: Custodian Key Shares</div>
-        <button class="btn btn-secondary btn-sm" onclick="closeSharesModal()">✕</button>
-      </div>
-      <div class="modal-body">
-        <p style="font-size: 13px; color: var(--accent-amber); margin-bottom: 12px;">
-          ⚠️ <strong>CRITICAL</strong>: Distribute these Shamir secret shares to your designated recovery custodians. These shares are <em>never stored</em> on the server.
-        </p>
-        <div style="font-size: 12px; margin-bottom: 6px;">Capsule ID: <code id="shares-modal-capsule-id"></code></div>
-        <textarea id="shares-display-list" class="form-textarea" rows="6" readonly></textarea>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-primary" onclick="closeSharesModal()">I Have Safely Distributed the Shares</button>
-      </div>
-    </div>
-  </div>
 
   <!-- Pairing Code Generator Modal -->
   <div id="pairing-gen-modal" class="modal-overlay">
@@ -494,71 +368,6 @@
     </div>
   </div>
 
-  <!-- Ceremony Create Modal -->
-  <div id="ceremony-create-modal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="panel-title">Initiate Quorum Recovery Ceremony</div>
-        <button class="btn btn-secondary btn-sm" onclick="closeCeremonyCreateModal()">✕</button>
-      </div>
-      <form onsubmit="submitCreateCeremony(event)">
-        <div class="modal-body">
-          <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
-            Initiates an interactive gathering session. Custodians will be able to submit their individual Shamir shares over time to satisfy the quorum threshold.
-          </p>
-          <div class="form-group">
-            <label class="form-label">Select Target Capsule</label>
-            <select id="ceremony-capsule-select" class="form-input" required>
-              <!-- Populated dynamically -->
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Ceremony Purpose / Reason</label>
-            <input id="ceremony-purpose" class="form-input" type="text" placeholder="e.g. Q3 Scheduled Verification Drill" value="Quarterly Restore Drill" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Ceremony Gathering Window (Minutes)</label>
-            <input id="ceremony-ttl" class="form-input" type="number" min="5" max="1440" value="60">
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" onclick="closeCeremonyCreateModal()">Cancel</button>
-          <button type="submit" class="btn btn-primary">Start Ceremony</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <!-- Ceremony Share Submit Modal -->
-  <div id="ceremony-submit-modal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="panel-title">Contribute Custodian Share</div>
-        <button class="btn btn-secondary btn-sm" onclick="closeCeremonySubmitModal()">✕</button>
-      </div>
-      <form onsubmit="submitCeremonyShare(event)">
-        <div class="modal-body">
-          <div style="font-size: 13px; margin-bottom: 12px;">Ceremony: <code id="ceremony-submit-session-id"></code></div>
-          <div class="form-group">
-            <label class="form-label">Your Name / Identifier</label>
-            <input id="ceremony-custodian-name" class="form-input" type="text" placeholder="e.g. Bob Keyholder" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Your Secret Share (Format: <code>index-hex</code>)</label>
-            <input id="ceremony-share-input" class="form-input" type="text" placeholder="1-a3f4e9..." required autocomplete="off">
-          </div>
-          <p style="font-size: 12px; color: var(--text-muted); margin-top: 8px;">
-            🔒 <strong>Zero-Persistence In-Memory Guarantee</strong>: Your share will remain strictly in RAM during this ceremony and will be cryptographically zeroed out immediately upon drill completion.
-          </p>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" onclick="closeCeremonySubmitModal()">Cancel</button>
-          <button type="submit" class="btn btn-primary">Submit Share</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
   <!-- Replication Target Add Modal -->
   <div id="replication-modal" class="modal-overlay">
     <div class="modal-card">
@@ -609,7 +418,7 @@
           </div>
           <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
             <input id="repl-auto-sync" type="checkbox" checked>
-            <label for="repl-auto-sync" style="font-size: 13px; font-weight: normal; margin: 0;">Automatically replicate new capsules immediately upon capture</label>
+            <label for="repl-auto-sync" style="font-size: 13px; font-weight: normal; margin: 0;">Automatically replicate new capsules immediately upon deposit</label>
           </div>
           <div id="repl-test-status" style="display: none; font-size: 13px; padding: 8px 12px; border-radius: 4px; margin-top: 8px;"></div>
         </div>
@@ -643,76 +452,29 @@
         </div>
 
         <div id="diff-results-container" style="display: none;">
-          <!-- Metric Badges -->
-          <div style="display: flex; gap: 12px; margin-bottom: 16px;">
-            <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
-              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Files Delta</div>
-              <div id="diff-files-delta" style="font-size: 18px; font-weight: bold; font-family: var(--font-mono); margin-top: 4px;">0</div>
-            </div>
-            <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
-              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Storage Delta</div>
-              <div id="diff-size-delta" style="font-size: 18px; font-weight: bold; font-family: var(--font-mono); margin-top: 4px;">0 B</div>
-            </div>
+          <!-- A blind store can only compare what the deposit declared. -->
+          <div style="display: flex; gap: 12px;">
             <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
               <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Payload Drift</div>
               <div id="diff-drift-badge" style="font-size: 14px; font-weight: bold; margin-top: 6px;">IDENTICAL</div>
             </div>
+            <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
+              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Quorum Change</div>
+              <div id="diff-quorum-delta" style="font-size: 14px; font-weight: bold; font-family: var(--font-mono); margin-top: 6px;">0 / 0</div>
+            </div>
+            <div style="flex: 1; background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); text-align: center;">
+              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Deposited</div>
+              <div id="diff-created-at" style="font-size: 12px; font-family: var(--font-mono); margin-top: 6px;">—</div>
+            </div>
           </div>
-
-          <!-- File Level Diffs -->
-          <h4 style="font-size: 13px; color: var(--accent-cyan); margin-bottom: 8px;">Changed Files & Data Blobs</h4>
-          <div style="overflow-x: auto; max-height: 220px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 6px; margin-bottom: 16px;">
-            <table class="data-table" style="margin: 0;">
-              <thead>
-                <tr>
-                  <th>File Path</th>
-                  <th>Status</th>
-                  <th>Old Size</th>
-                  <th>New Size</th>
-                  <th>Delta</th>
-                </tr>
-              </thead>
-              <tbody id="diff-files-tbody">
-                <!-- Dynamically populated -->
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Dependency Drift -->
-          <h4 style="font-size: 13px; color: var(--accent-cyan); margin-bottom: 8px;">Dependency & Environment Drift</h4>
-          <div id="diff-dependencies-list" style="font-size: 12px; color: var(--text-dim); margin-bottom: 16px;">
-            No dependency changes detected between snapshots.
-          </div>
+          <p style="font-size: 12px; color: var(--text-muted); margin-top: 12px;">
+            The capsules are sealed to the suite recovery key, so this server cannot list the files inside them. Only the deposited payload hash and quorum policy can be compared here.
+          </p>
         </div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="closeDiffModal()">Close</button>
-        <button type="button" id="btn-rollback-target" class="btn btn-primary" style="display: none;" onclick="triggerRollbackDrill()">⚡ Prepare Rollback Drill for Target</button>
       </div>
-    </div>
-  </div>
-
-  <!-- Drill Modal -->
-  <div id="drill-modal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="panel-title">Execute Ephemeral Restore Drill</div>
-        <button class="btn btn-secondary btn-sm" onclick="closeDrillModal()">✕</button>
-      </div>
-      <form onsubmit="submitDrill(event)">
-        <div class="modal-body">
-          <div style="font-size: 13px; margin-bottom: 12px;">Capsule: <code id="drill-modal-capsule-id"></code></div>
-          <div class="form-group">
-            <label class="form-label" id="drill-threshold-msg">Enter Custodian Shares (one per line, format: index-hex)</label>
-            <textarea id="drill-shares-input" class="form-textarea" rows="4" placeholder="1-a3f4e9...\n2-b8c1d0..." required></textarea>
-          </div>
-          <div id="drill-result-box" style="display: none; margin-top: 16px;"></div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" onclick="closeDrillModal()">Close</button>
-          <button type="submit" id="btn-run-drill-submit" class="btn btn-primary">Run Isolated Drill</button>
-        </div>
-      </form>
     </div>
   </div>
 

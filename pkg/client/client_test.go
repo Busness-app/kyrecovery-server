@@ -3,8 +3,6 @@ package client_test
 import (
 	"context"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,7 +14,7 @@ import (
 	"github.com/Busness-app/kyrecovery-server/pkg/client"
 )
 
-func TestClientSDKFlow(t *testing.T) {
+func TestClientClaimsPairingCode(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Start test server
@@ -47,7 +45,7 @@ func TestClientSDKFlow(t *testing.T) {
 	}
 
 	// 3. Client claims pairing code using SDK
-	c, claimResp, err := client.ClaimPairing(ctx, ts.URL, pairedRecord.PairingCode, "KyBookmarks Cluster Primary")
+	_, claimResp, err := client.ClaimPairing(ctx, ts.URL, pairedRecord.PairingCode, "KyBookmarks Cluster Primary")
 	if err != nil {
 		t.Fatalf("ClaimPairing failed: %v", err)
 	}
@@ -55,23 +53,4 @@ func TestClientSDKFlow(t *testing.T) {
 		t.Fatalf("unexpected claim response: %+v", claimResp)
 	}
 
-	// 4. Create sample files in temp dir to push
-	tempDir := t.TempDir()
-	dataDir := filepath.Join(tempDir, "data")
-	configDir := filepath.Join(tempDir, "config")
-	_ = os.MkdirAll(dataDir, 0700)
-	_ = os.MkdirAll(configDir, 0700)
-
-	_ = os.WriteFile(filepath.Join(dataDir, "bookmarks.json"), []byte(`[{"title": "KySecurity", "url": "https://kysecurity.org"}]`), 0600)
-	_ = os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"sync": true}`), 0600)
-
-	// 5. Client pushes directory backup
-	pushResp, err := c.PushDirectory(ctx, "kybookmarks", "KyBookmarks Cluster Primary", "v1.2.0", tempDir, 2, 3)
-	if err != nil {
-		t.Fatalf("PushDirectory failed: %v", err)
-	}
-
-	if pushResp.Status != "ingested" || pushResp.CapsuleID == "" {
-		t.Fatalf("unexpected push response: %+v", pushResp)
-	}
 }

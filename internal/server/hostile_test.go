@@ -2,12 +2,10 @@ package server_test
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -57,8 +55,8 @@ func sessionCookie(t *testing.T, database *db.DB, role string) *http.Cookie {
 }
 
 // TestRoleEnforcementOverHTTP proves the policy table is actually applied by the
-// handler chain: a viewer cannot run a ceremony, an operator cannot rotate the
-// trust configuration, and an anonymous caller cannot do either.
+// handler chain: a viewer cannot start a replication sync, an operator cannot
+// rotate the trust configuration, and an anonymous caller cannot do either.
 func TestRoleEnforcementOverHTTP(t *testing.T) {
 	srv, database := newTestServer(t)
 
@@ -70,11 +68,8 @@ func TestRoleEnforcementOverHTTP(t *testing.T) {
 		name, method, path, body string
 		minRole                  string
 	}{
-		{"capsule capture", http.MethodPost, "/api/capsules/capture", `{"service_name":"kysignon"}`, auth.RoleOperator},
-		{"run drill", http.MethodPost, "/api/drills/run", `{"capsule_id":"cap-x"}`, auth.RoleOperator},
-		{"ceremony create", http.MethodPost, "/api/ceremonies/create", `{"capsule_id":"cap-x"}`, auth.RoleOperator},
-		{"ceremony submit", http.MethodPost, "/api/ceremonies/submit", `{"session_id":"s","share":"1-aa"}`, auth.RoleOperator},
-		{"ceremony execute", http.MethodPost, "/api/ceremonies/execute", `{"session_id":"s"}`, auth.RoleOperator},
+		{"custodian create", http.MethodPost, "/api/custodians", `{"name":"C","email":"c@example.invalid"}`, auth.RoleOperator},
+		{"audit verify", http.MethodPost, "/api/audit/verify", `{}`, auth.RoleOperator},
 		{"replication sync", http.MethodPost, "/api/replication/sync", `{"capsule_id":"cap-x"}`, auth.RoleOperator},
 		{"pairing generate", http.MethodPost, "/api/pairing/generate", `{}`, auth.RoleAdmin},
 		{"pairing revoke", http.MethodPost, "/api/pairing/revoke", `{"id":"pair-x"}`, auth.RoleAdmin},
@@ -163,150 +158,6 @@ func TestSSOTestEndpointIsNotAnOpenSSRFPrimitive(t *testing.T) {
 	}
 }
 
-// TestConcurrentPushesDoNotClobberEachOther is the recovery-integrity case: two
-// backups of the same service arriving in the same second must produce two intact
-// capsules, not one overwritten file.
-func TestConcurrentPushesDoNotClobberEachOther(t *testing.T) {
-	srv, database := newTestServer(t)
-	token := pairProduct(t, srv, database, "kynotes")
-
-	const pushes = 4
-	var wg sync.WaitGroup
-	results := make([]struct {
-		code int
-		id   string
-		hash string
-		body string
-	}, pushes)
-
-	for i := 0; i < pushes; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			body, _ := json.Marshal(map[string]interface{}{
-				"service_name": "kynotes",
-				"files": map[string]string{
-					"data/notes.txt": base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("backup number %d", i))),
-				},
-			})
-			req := httptest.NewRequest(http.MethodPost, "/api/backup/push", bytes.NewReader(body))
-			req.Header.Set("Authorization", "Bearer "+token)
-			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
-
-			var resp struct {
-				CapsuleID   string `json:"capsule_id"`
-				PayloadHash string `json:"payload_hash"`
-			}
-			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-			results[i].code = rec.Code
-			results[i].id = resp.CapsuleID
-			results[i].hash = resp.PayloadHash
-			results[i].body = rec.Body.String()
-		}(i)
-	}
-	wg.Wait()
-
-	seen := map[string]bool{}
-	for i, r := range results {
-		if r.code != http.StatusOK {
-			t.Fatalf("push %d failed: %d %s", i, r.code, r.body)
-		}
-		if seen[r.id] {
-			t.Fatalf("capsule ID %s was reused by two pushes", r.id)
-		}
-		seen[r.id] = true
-	}
-
-	// Every capsule the database describes must still exist on disk with the size
-	// that was recorded for it.
-	capsules, err := database.ListCapsules(t.Context())
-	if err != nil {
-		t.Fatalf("ListCapsules failed: %v", err)
-	}
-	if len(capsules) != pushes {
-		t.Fatalf("expected %d capsules, got %d", pushes, len(capsules))
-	}
-	for _, c := range capsules {
-		info, err := os.Stat(c.FilePath)
-		if err != nil {
-			t.Fatalf("capsule %s recorded but missing on disk: %v", c.ID, err)
-		}
-		if info.Size() != c.SizeBytes {
-			t.Fatalf("capsule %s: recorded %d bytes, file holds %d — a later push overwrote it",
-				c.ID, c.SizeBytes, info.Size())
-		}
-	}
-}
-
-// TestBackupPushRejectsHostilePayloads covers the bounds a compromised product
-// token would otherwise be able to ignore.
-func TestBackupPushRejectsHostilePayloads(t *testing.T) {
-	srv, database := newTestServer(t)
-	token := pairProduct(t, srv, database, "kynotes")
-
-	push := func(payload map[string]interface{}) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPost, "/api/backup/push", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
-		return rec
-	}
-	oneFile := map[string]string{"a.txt": base64.StdEncoding.EncodeToString([]byte("hi"))}
-
-	// A service name is used to build the capsule filename.
-	for _, name := range []string{"../../../etc/cron.d/evil", "a/b", "..", "with space"} {
-		if rec := push(map[string]interface{}{"service_name": name, "files": oneFile}); rec.Code != http.StatusBadRequest {
-			t.Errorf("service_name %q expected 400, got %d: %s", name, rec.Code, rec.Body.String())
-		}
-	}
-
-	// Shamir cannot produce more than 255 shares; the request must be refused
-	// rather than accepted and silently reinterpreted.
-	if rec := push(map[string]interface{}{
-		"service_name": "kynotes", "threshold": 2, "total_shares": 100000, "files": oneFile,
-	}); rec.Code != http.StatusBadRequest {
-		t.Errorf("total_shares 100000 expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Too many files.
-	many := map[string]string{}
-	for i := 0; i < 5000; i++ {
-		many[fmt.Sprintf("f%d.txt", i)] = base64.StdEncoding.EncodeToString([]byte("x"))
-	}
-	if rec := push(map[string]interface{}{"service_name": "kynotes", "files": many}); rec.Code != http.StatusBadRequest {
-		t.Errorf("5000 files expected 400, got %d", rec.Code)
-	}
-}
-
-// TestBackupPushBodyIsBounded proves the request body itself is capped, so a
-// paired product cannot stream unbounded data into memory.
-func TestBackupPushBodyIsBounded(t *testing.T) {
-	t.Setenv(server.EnvMaxBackupPushBytes, "4096")
-	srv, database := newTestServer(t)
-	token := pairProduct(t, srv, database, "kynotes")
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"service_name": "kynotes",
-		"files":        map[string]string{"big.bin": base64.StdEncoding.EncodeToString(make([]byte, 64<<10))},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/backup/push", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized push expected rejection, got %d: %s", rec.Code, rec.Body.String())
-	}
-	capsules, _ := database.ListCapsules(t.Context())
-	if len(capsules) != 0 {
-		t.Fatalf("an oversized push was stored anyway: %d capsules", len(capsules))
-	}
-}
-
-// TestLocalLoginIsThrottled keeps an unauthenticated caller from spending the
-// server's Argon2 budget, and keeps the session out of the response body.
 func TestLocalLoginIsThrottled(t *testing.T) {
 	srv, database := newTestServer(t)
 	authMgr := auth.NewManager(auth.OIDCConfig{}, database)

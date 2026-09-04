@@ -7,8 +7,8 @@
 package secrets
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,9 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Busness-app/ky-primitives/keyfile"
 	"golang.org/x/crypto/hkdf"
-
-	"crypto/sha256"
 
 	"github.com/Busness-app/kyrecovery-server/internal/crypto"
 )
@@ -44,35 +43,17 @@ type Keyring struct {
 // Load returns the keyring for dataDir, creating a new key file on first run.
 // An empty dataDir yields an ephemeral key (in-memory databases only).
 func Load(dataDir string) (*Keyring, error) {
-	if env := strings.TrimSpace(os.Getenv(EnvKey)); env != "" {
-		key, err := decodeKey(env)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", EnvKey, err)
-		}
+	if key, ok, err := keyfile.FromEnv(EnvKey, crypto.KeyLength); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvKey, err)
+	} else if ok {
 		return &Keyring{master: key, dir: dataDir}, nil
 	}
 	if dataDir == "" {
 		return Ephemeral()
 	}
 
-	path := filepath.Join(dataDir, KeyFileName)
-	raw, err := os.ReadFile(path)
-	if err == nil {
-		key, err := decodeKey(strings.TrimSpace(string(raw)))
-		if err != nil {
-			return nil, fmt.Errorf("invalid key file %s: %w", path, err)
-		}
-		return &Keyring{master: key, dir: dataDir}, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("failed reading key file %s: %w", path, err)
-	}
-
-	key, err := crypto.GenerateMasterKey()
+	key, err := keyfile.LoadOrCreate(filepath.Join(dataDir, KeyFileName), crypto.KeyLength)
 	if err != nil {
-		return nil, err
-	}
-	if err := writeNewKeyFile(path, key); err != nil {
 		return nil, err
 	}
 	return &Keyring{master: key, dir: dataDir}, nil
@@ -104,34 +85,11 @@ func (k *Keyring) MarkLedgerKeyed() error {
 
 // Ephemeral returns a keyring backed by a random key that is never persisted.
 func Ephemeral() (*Keyring, error) {
-	key, err := crypto.GenerateMasterKey()
+	key, err := crypto.GenerateRandomBytes(crypto.KeyLength)
 	if err != nil {
 		return nil, err
 	}
 	return &Keyring{master: key}, nil
-}
-
-// writeNewKeyFile creates path exclusively so a concurrent starter cannot lose its key.
-func writeNewKeyFile(path string, key []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("failed creating key file %s: %w", path, err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
-		return fmt.Errorf("failed writing key file %s: %w", path, err)
-	}
-	return f.Sync()
-}
-
-func decodeKey(s string) ([]byte, error) {
-	if key, err := hex.DecodeString(s); err == nil && len(key) == crypto.KeyLength {
-		return key, nil
-	}
-	if key, err := base64.StdEncoding.DecodeString(s); err == nil && len(key) == crypto.KeyLength {
-		return key, nil
-	}
-	return nil, fmt.Errorf("expected %d bytes as hex or base64", crypto.KeyLength)
 }
 
 func (k *Keyring) derive(info string) []byte {
