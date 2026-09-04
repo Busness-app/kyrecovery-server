@@ -367,6 +367,7 @@ async function loadAuthUser() {
       loadCustodians();
       loadAudit();
       loadReplication();
+      loadRecoveryKey();
     } else {
       currentUser = null;
       if (nameEl) nameEl.textContent = 'Unauthenticated';

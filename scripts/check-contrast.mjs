@@ -18,13 +18,29 @@ const ratio = (a, b) => {
   return (hi + 0.05) / (lo + 0.05);
 };
 
+// A wash is rgba(r, g, b, a); composite it over a surface in sRGB.
+const wash = name => {
+  const m = css.match(new RegExp(`--${name}:\\s*rgba\\((\\d+),\\s*(\\d+),\\s*(\\d+),\\s*([0-9.]+)\\)`));
+  if (!m) throw new Error(`wash --${name} not found`);
+  return { rgb: m.slice(1, 4).map(Number), a: Number(m[4]) };
+};
+const hexOf = rgb => '#' + rgb.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+const over = (w, surface) => {
+  const bg = surface.slice(1).match(/../g).map(x => parseInt(x, 16));
+  return hexOf(w.rgb.map((c, i) => w.a * c + (1 - w.a) * bg[i]));
+};
+
 const surfaces = ['ink', 'ink-raised', 'ink-well'];
 const text = ['paper', 'paper-muted', 'paper-dim', 'brass', 'ok', 'warn', 'bad'];
+const pills = ['brass', 'ok', 'warn', 'bad']; // each paints on its own -wash
 let failed = false;
-for (const t of text) for (const s of surfaces) {
-  const r = ratio(token(t), token(s));
+const report = (label, r) => {
   const ok = r >= 4.5;
   if (!ok) failed = true;
-  console.log(`${ok ? 'ok  ' : 'FAIL'} --${t} on --${s}: ${r.toFixed(2)}`);
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}: ${r.toFixed(2)}`);
+};
+for (const t of text) for (const s of surfaces) report(`--${t} on --${s}`, ratio(token(t), token(s)));
+for (const t of pills) for (const s of surfaces) {
+  report(`--${t} on --${t}-wash over --${s}`, ratio(token(t), over(wash(`${t}-wash`), token(s))));
 }
 if (failed) process.exit(1);

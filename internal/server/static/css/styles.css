@@ -13,13 +13,13 @@
   --paper-dim: #939eab; /* 5.7:1 on --ink, 4.9:1 on --ink-raised: AA for body text */
   --brass: #c9a227;
   --brass-ink: #1a1508;
-  --brass-wash: rgba(201, 162, 39, 0.14);
+  --brass-wash: rgba(201, 162, 39, 0.1);
   --ok: #6fbf8a;
-  --ok-wash: rgba(111, 191, 138, 0.14);
+  --ok-wash: rgba(111, 191, 138, 0.12);
   --warn: #d8a657;
-  --warn-wash: rgba(216, 166, 87, 0.14);
-  --bad: #e38b80;
-  --bad-wash: rgba(217, 117, 106, 0.14);
+  --warn-wash: rgba(216, 166, 87, 0.12);
+  --bad: #eb9d93;
+  --bad-wash: rgba(235, 157, 147, 0.12); /* same red as --bad */
 
   --serif: "Charter", "Bitstream Charter", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
