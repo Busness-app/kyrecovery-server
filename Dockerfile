@@ -14,10 +14,11 @@ RUN apk --no-cache add ca-certificates tzdata su-exec
 # KyRecovery needs no privilege beyond its own data directory, so it does not get
 # any at runtime. The uid is fixed so a bind-mounted ./data can be chowned to
 # match; docker-entrypoint.sh does that chown (needs root) then drops to this
-# user before the app itself ever runs. The entrypoint and binary stay
-# root-owned so the app user cannot rewrite what root executes next boot.
+# user before the app itself ever runs. /app and its executables stay
+# root-owned so the app user cannot replace what root executes next boot;
+# the account gets no home there, only /app/data is app-writable.
 RUN addgroup -g 10001 -S kyrecovery && \
-    adduser -u 10001 -S -G kyrecovery -h /app kyrecovery
+    adduser -u 10001 -S -G kyrecovery -H -h /nonexistent kyrecovery
 
 WORKDIR /app
 COPY --from=builder /app/kyrecovery /app/kyrecovery
