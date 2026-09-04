@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/secrets"
 )
 
 const (
@@ -95,7 +97,11 @@ func (m *Manager) loadSettingsFromDB(ctx context.Context) {
 		m.cfg.ClientID = clientID
 	}
 	if clientSecret, err := m.db.GetSetting(ctx, SettingSSOClientSecret); err == nil && clientSecret != "" {
-		if opened, err := m.db.Keyring().Open(clientSecret); err == nil {
+		// A stored secret that will not open leaves SSO with no client secret, which is a
+		// silent login failure unless it is said out loud here.
+		if opened, err := m.db.Keyring().Open(clientSecret); err != nil {
+			log.Printf("auth: stored SSO client secret could not be opened (wrong or missing %s key file, or the row was written unsealed): %v", secrets.EnvKey, err)
+		} else {
 			m.cfg.ClientSecret = opened
 		}
 	}

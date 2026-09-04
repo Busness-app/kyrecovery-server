@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -773,8 +774,13 @@ func (d *DB) ListReplicationTargets(ctx context.Context) ([]ReplicationTargetRec
 			return nil, err
 		}
 		t.AutoSync = autoSyncInt == 1
-		if t.SecretKey, err = d.keys.Open(t.SecretKey); err != nil {
-			return nil, err
+		// One unopenable secret must not hide every target: the operator needs to see the
+		// broken row to fix or delete it, so it is listed with no credential.
+		if opened, openErr := d.keys.Open(t.SecretKey); openErr != nil {
+			log.Printf("db: replication target %s has an unopenable secret key: %v", t.ID, openErr)
+			t.SecretKey = ""
+		} else {
+			t.SecretKey = opened
 		}
 		list = append(list, t)
 	}
