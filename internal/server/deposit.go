@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -61,7 +62,7 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 
 	// A whole container may be on the wire; give the read its own budget rather than
 	// letting a header-sized timeout truncate it into a bogus 400.
-	setDeadline(w, capsuleTransferBudget)
+	setReadDeadline(w, capsuleTransferBudget)
 	raw, err := io.ReadAll(r.Body) // MaxBytesReader in ServeHTTP caps this at capsule.MaxContainerBytes
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -146,11 +147,19 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 
 // respondToDuplicate answers a deposit whose ID is already stored: identical bytes are the
 // idempotent retry the products actually make, anything else is a collision. A row whose file
-// is missing is a crash-orphaned insert (the rename never happened, or the file was lost after);
+// is absent is a crash-orphaned insert (the rename never happened, or the file was lost after);
 // it is marked corrupt and refused so the product retries with a new ID instead of believing
 // the deposit already exists.
+//
+// As in verifyCapsule, only absence is evidence: any other stat failure is a fact about the
+// disk, not about the capsule, so the row is left alone and the deposit gets a 500.
 func (s *Server) respondToDuplicate(ctx context.Context, w http.ResponseWriter, stored *db.CapsuleRecord, digest string) {
 	if _, err := os.Stat(stored.FilePath); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("deposit: stat of capsule %s: %v", stored.ID, err)
+			writeError(w, http.StatusInternalServerError, "Failed reading the stored capsule file")
+			return
+		}
 		if setErr := s.db.SetCapsuleStatus(ctx, stored.ID, "corrupt"); setErr != nil {
 			log.Printf("deposit: marking capsule %s corrupt: %v", stored.ID, setErr)
 		}

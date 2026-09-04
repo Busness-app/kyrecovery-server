@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -287,6 +288,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
 
+	// Every request delivers its body on a clock. The deposit and download raise their
+	// own budget from here; nothing lowers it.
+	setReadDeadline(w, requestReadBudget)
+
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
@@ -422,11 +427,22 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
 			return
 		}
-		// Taking sealed bytes off the store is an event an operator must be able to see later.
-		_, _ = s.ledger.Record(ctx, "capsule_downloaded", s.actor(r), capRec.ID, map[string]interface{}{
-			"digest": capRec.Digest, "status": capRec.Status, "size_bytes": info.Size(),
-		})
-		setDeadline(w, capsuleTransferBudget)
+		// Taking sealed bytes off the store is the event that most needs a record, so it
+		// is written before any byte leaves — an unrecordable download does not happen.
+		if err := s.ledger.Healthy(); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Audit ledger is not writable; downloads refused until an operator repairs it")
+			return
+		}
+		details := map[string]interface{}{"digest": capRec.Digest, "status": capRec.Status, "size_bytes": info.Size()}
+		if rng := r.Header.Get("Range"); rng != "" {
+			details["range"] = rng // size_bytes is the whole file; this says what was actually asked for
+		}
+		if _, err := s.ledger.Record(ctx, "capsule_downloaded", s.actor(r), capRec.ID, details); err != nil {
+			log.Printf("download: recording capsule %s: %v", capRec.ID, err)
+			writeError(w, http.StatusServiceUnavailable, "Failed recording the download in the audit chain; download refused")
+			return
+		}
+		setWriteDeadline(w, capsuleTransferBudget)
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.kycap", capsuleID))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Capsule-Digest", capRec.Digest)

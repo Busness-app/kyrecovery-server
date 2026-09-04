@@ -41,16 +41,27 @@ const (
 	capsuleTransferBudget = 15 * time.Minute
 )
 
-// setDeadline gives one request its own clock. The listener sets no ReadTimeout or
-// WriteTimeout, because a capsule transfer has no size a fixed timeout could fit; the
-// routes that move one take a budget here instead of running unbounded. Not every
+// requestReadBudget is how long any one request has to deliver its body. The listener sets
+// no ReadTimeout — a capsule does not fit one — so without this a client trickling a byte
+// a second at a 1 MiB route would hold a goroutine for as long as it liked: MaxBytesReader
+// bounds the bytes, nothing bounded the clock, and IdleTimeout does not apply mid-request.
+// The two capsule routes raise it to capsuleTransferBudget for themselves.
+//
+// A variable so a test can shorten it; nothing else writes it.
+var requestReadBudget = 30 * time.Second
+
+// setReadDeadline and setWriteDeadline give one request its own clock. Not every
 // ResponseWriter supports deadlines (httptest.ResponseRecorder does not), and one that
 // does not is not a request failure.
-func setDeadline(w http.ResponseWriter, d time.Duration) {
-	rc := http.NewResponseController(w)
-	at := time.Now().Add(d)
-	_ = rc.SetReadDeadline(at)
-	_ = rc.SetWriteDeadline(at)
+//
+// There is deliberately no blanket write deadline: /api/auth/callback blocks on an
+// identity provider round trip before it writes a byte.
+func setReadDeadline(w http.ResponseWriter, d time.Duration) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
+}
+
+func setWriteDeadline(w http.ResponseWriter, d time.Duration) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d))
 }
 
 // serviceNamePattern is what may appear in a capsule ID, and therefore in a
