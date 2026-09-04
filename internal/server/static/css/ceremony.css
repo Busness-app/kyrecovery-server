@@ -5,4 +5,16 @@
 .ceremony .form-label { display: block; margin-bottom: 12px; }
 .card { padding: 20px; margin-bottom: 20px; border: 1px solid var(--border-color); page-break-inside: avoid; }
 .card .share { font-size: 1.1em; }
-@media print { .no-print, #ceremony-form { display: none; } }
+
+/* A share is one unbreakable token longer than a printable column; without this it is
+   clipped at the page edge and nobody finds out until recovery day. */
+.card .share, .card code { overflow-wrap: anywhere; word-break: break-all; }
+
+/* The dashboard theme is dark and browsers drop backgrounds when printing, which would
+   put near-white text on white paper. On paper the cards are black on white, and only
+   the cards are on it. */
+@media print {
+  body { background: #fff; color: #000; }
+  .card, .card code { background: #fff; color: #000; border-color: #000; }
+  .no-print, form, #ceremony-form, #import-btn, #import-status { display: none; }
+}

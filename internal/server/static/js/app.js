@@ -142,7 +142,7 @@ async function loadRecoveryKey() {
     }
     if (!res.ok) return;
     const k = await res.json();
-    el.innerHTML = `Key ID <code>${esc(k.key_id)}</code> &mdash; ${esc(k.threshold)} of ${esc(k.total_shares)} custodian cards, imported by ${esc(k.imported_by)} on ${new Date(k.imported_at).toLocaleString()}`;
+    el.innerHTML = `Key ID <code>${esc(k.key_id)}</code> &mdash; ${esc(k.threshold)} of ${esc(k.total_shares)} custodian cards, imported by ${esc(k.imported_by)} on ${esc(new Date(k.imported_at).toLocaleString())}`;
   } catch (err) {
     console.error('Error fetching recovery key:', err);
   }

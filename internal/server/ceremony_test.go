@@ -92,3 +92,20 @@ func TestCeremonyWasmContentType(t *testing.T) {
 		t.Fatalf("Content-Type %q, want application/wasm", ct)
 	}
 }
+
+// The cards are only useful on paper: printed black on white, with the share string
+// wrapped rather than clipped at the page edge. Neither can be asserted headlessly, so
+// this pins the two rules that make them true.
+func TestCeremonyPrintStylesAreServed(t *testing.T) {
+	srv, _, _ := newAdminServer(t)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/static/css/ceremony.css", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	for _, rule := range []string{"@media print", "overflow-wrap: anywhere"} {
+		if !strings.Contains(w.Body.String(), rule) {
+			t.Errorf("ceremony.css is missing %q", rule)
+		}
+	}
+}
