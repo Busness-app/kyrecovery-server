@@ -54,6 +54,16 @@ func (l *Ledger) resume(ctx context.Context) error {
 		return err
 	}
 	if !found {
+		// No anchor is only a fresh store if the log is empty too. Events without an
+		// anchor is the same evidence as an anchor without its events: something removed
+		// a row, and the row it removed is the one that would have caught it.
+		last, err := l.db.GetLastAuditEvent(ctx)
+		if err != nil {
+			return err
+		}
+		if last != nil {
+			return errors.New("audit log has events but no anchor; refusing to append")
+		}
 		l.chain, err = auditchain.New(l.key)
 		return err
 	}

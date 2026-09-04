@@ -69,3 +69,29 @@ func TestVerifyIsSafeAlongsideConcurrentRecords(t *testing.T) {
 		}
 	}
 }
+
+// Removing the anchor is the one deletion the anchor cannot catch, so the log has to.
+// Events without an anchor must latch the ledger, not start a fresh chain over them.
+func TestEventsWithoutAnAnchorLatchTheLedger(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	l := audit.NewLedger(database)
+	for i := 0; i < 3; i++ {
+		if _, err := l.Record(t.Context(), "capsule_deposited", "paired-app:x", "cap-1", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.DeleteAuditAnchorForTest(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	l2 := audit.NewLedger(database)
+	if l2.Healthy() == nil {
+		t.Fatal("a log with events but no anchor reports healthy")
+	}
+	if _, err := l2.Record(t.Context(), "x", "y", "z", nil); err == nil {
+		t.Fatal("append succeeded over an anchorless log")
+	}
+}

@@ -528,6 +528,12 @@ func (d *DB) ListAuditEvents(ctx context.Context, limit int) ([]AuditRecord, err
 
 // DeleteAuditEventForTest removes one audit event. It exists for tests that need
 // a damaged log; nothing in production calls it.
+// DeleteAuditAnchorForTest removes the anchor row, as a database-level attacker would.
+func (d *DB) DeleteAuditAnchorForTest(ctx context.Context) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM audit_anchor WHERE singleton = 1`)
+	return err
+}
+
 func (d *DB) DeleteAuditEventForTest(ctx context.Context, seq uint64) error {
 	_, err := d.conn.ExecContext(ctx, `DELETE FROM audit_events WHERE seq = ?`, seq)
 	return err

@@ -30,6 +30,7 @@ import (
 // so one bad I/O moment does not get amplified into a store-wide "corrupt" verdict the
 // operator then has to disbelieve.
 func (s *Server) verifyCapsule(ctx context.Context, rec *db.CapsuleRecord, actor string) (bool, error) {
+	defer s.idLocks.acquire(rec.ID)()
 	f, err := os.Open(rec.FilePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

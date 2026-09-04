@@ -53,6 +53,7 @@ type Server struct {
 	loginLimit  *rateLimiter
 	pushLimit   *rateLimiter
 	pushSlots   chan struct{}
+	idLocks     idLocks
 	mux         *http.ServeMux
 }
 

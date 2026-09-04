@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -98,17 +99,27 @@ func bodyLimit(path string) int64 {
 	return maxAPIBodyBytes
 }
 
-// publishCapsule durably stores a capsule and its database record.
+// errDepositUnrecorded: the audit chain would not take the deposit, so the store did not.
+var errDepositUnrecorded = errors.New("deposit could not be recorded in the audit chain")
+
+// errCapsuleFileExists: the path is already taken on disk by a file no row describes.
+var errCapsuleFileExists = errors.New("a capsule file with this ID already exists on disk")
+
+// publishCapsule durably stores a capsule, its audit event and its database record.
 //
-// The database row is the mutual-exclusion primitive, not the file: the primary key makes
-// InsertCapsule atomic, so exactly one of any number of racing deposits of the same capsule
-// ID claims the path. Order matters. The bytes are written to a private temporary file and
-// fsynced first, so no record can describe a file that was never fully written; the row is
-// then claimed; only the request that won the row renames its temporary file into place.
-// A loser removes its own temporary file and nothing else — an earlier version renamed
-// first and deleted rec.FilePath when the insert failed, which let a retry racing the
-// original delete a capsule the store had already published.
-func (s *Server) publishCapsule(ctx context.Context, rec db.CapsuleRecord, capsuleBytes []byte) error {
+// The database row is the mutual-exclusion primitive: the primary key makes InsertCapsule
+// atomic, so exactly one of any number of racing deposits of the same capsule ID claims
+// it. Order matters. The bytes are written to a private temporary file and fsynced first,
+// so no record can describe a file that was never fully written; the row is then claimed;
+// the deposit is recorded in the audit chain; only then is the file published. A 201
+// therefore implies a chain entry, and a loser removes its own temporary file and nothing
+// else — an earlier version renamed first and deleted rec.FilePath when the insert failed,
+// which let a retry racing the original delete a capsule the store had already published.
+//
+// The file is published with a hard link, not a rename: rename replaces whatever is at the
+// target, and on a case-insensitive volume two IDs that are two rows can be one path. link
+// refuses an existing target, so the filesystem enforces the same exclusion as the row.
+func (s *Server) publishCapsule(ctx context.Context, rec db.CapsuleRecord, capsuleBytes []byte, record func(context.Context) error) error {
 	f, err := os.CreateTemp(filepath.Dir(rec.FilePath), filepath.Base(rec.FilePath)+".tmp")
 	if err != nil {
 		return fmt.Errorf("failed creating capsule file: %w", err)
@@ -141,13 +152,27 @@ func (s *Server) publishCapsule(ctx context.Context, rec db.CapsuleRecord, capsu
 		}
 		return fmt.Errorf("failed recording capsule: %w", err)
 	}
-	if err := os.Rename(tmpPath, rec.FilePath); err != nil {
-		// The row is this request's, so releasing it is safe. Run the rollback on an
-		// uncancelable context: a client that hung up must not leave a row with no file.
-		_ = s.db.DeleteCapsule(context.WithoutCancel(ctx), rec.ID)
+	// The row is this request's, so releasing it on failure is safe. From here on the
+	// context is uncancelable: a client that hung up must not leave a row with no file,
+	// or a file with no event.
+	ctx = context.WithoutCancel(ctx)
+	if err := record(ctx); err != nil {
+		_ = s.db.DeleteCapsule(ctx, rec.ID)
 		cleanup()
+		return fmt.Errorf("%w: %v", errDepositUnrecorded, err)
+	}
+	if err := os.Link(tmpPath, rec.FilePath); err != nil {
+		_ = s.db.DeleteCapsule(ctx, rec.ID)
+		cleanup()
+		// The chain already says deposited; append-only means the correction is a second
+		// event, not a missing one.
+		_, _ = s.ledger.Record(ctx, "capsule_deposit_failed", "system", rec.ID, map[string]interface{}{"error": err.Error()})
+		if errors.Is(err, fs.ErrExist) {
+			return errCapsuleFileExists
+		}
 		return fmt.Errorf("failed publishing capsule file: %w", err)
 	}
+	cleanup()
 	return nil
 }
 

@@ -357,3 +357,80 @@ func TestSlowDepositOutlivesTheListenerReadTimeout(t *testing.T) {
 		t.Fatalf("slow deposit: %d %s", resp.StatusCode, body)
 	}
 }
+
+// A 201 implies a chain entry. If the ledger will not take the event, the deposit is refused
+// and nothing of it remains: no row, no file.
+func TestDepositIsRefusedWhenItCannotBeRecorded(t *testing.T) {
+	srv, cookie, database := newAdminServer(t)
+	k, _ := recoverykey.Generate()
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	if rec := deposit(srv, token, sealFor(t, k.Public(), "kynotes")); rec.Code != http.StatusCreated {
+		t.Fatalf("first deposit: %d %s", rec.Code, rec.Body.String())
+	}
+	first, _ := database.ListCapsules(t.Context())
+	capsuleDir := filepath.Dir(first[0].FilePath)
+
+	// Occupy the sequence the ledger will append to next; the insert must then conflict.
+	last, err := database.GetLastAuditEvent(t.Context())
+	if err != nil || last == nil {
+		t.Fatalf("last audit event: %v %v", last, err)
+	}
+	count, hash, _, err := database.GetAuditAnchor(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	squatter := *last
+	squatter.Seq = last.Seq + 1
+	if err := database.InsertAuditEventAndAnchor(t.Context(), squatter, count, hash); err != nil {
+		t.Fatal(err)
+	}
+
+	before, _ := database.ListCapsules(t.Context())
+	rec := deposit(srv, token, sealFor(t, k.Public(), "kynotes"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unrecordable deposit: %d %s, want 503", rec.Code, rec.Body.String())
+	}
+	after, _ := database.ListCapsules(t.Context())
+	if len(after) != len(before) {
+		t.Fatalf("an unrecorded deposit left a row: %d -> %d", len(before), len(after))
+	}
+	entries, _ := os.ReadDir(capsuleDir)
+	if len(entries) != 1 {
+		t.Fatalf("an unrecorded deposit left files: %v", entries)
+	}
+}
+
+// The file path is exclusive on its own, not only through the row: a file the store did
+// not put there (or a case-variant of one it did, on a volume that folds case) is never
+// overwritten by a deposit.
+func TestDepositNeverOverwritesAnExistingFile(t *testing.T) {
+	srv, cookie, database := newAdminServer(t)
+	k, _ := recoverykey.Generate()
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	raw := sealFor(t, k.Public(), "kynotes")
+	if rec := deposit(srv, token, raw); rec.Code != http.StatusCreated {
+		t.Fatalf("deposit: %d %s", rec.Code, rec.Body.String())
+	}
+	caps, _ := database.ListCapsules(t.Context())
+	stored := caps[0]
+	if err := os.WriteFile(stored.FilePath, []byte("someone else's sealed bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteCapsule(t.Context(), stored.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := deposit(srv, token, raw)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("deposit onto an occupied path: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(stored.FilePath)
+	if string(got) != "someone else's sealed bytes" {
+		t.Fatal("the deposit overwrote a file it did not own")
+	}
+	if row, _ := database.GetCapsule(t.Context(), stored.ID); row != nil {
+		t.Fatal("a refused deposit left a row")
+	}
+}

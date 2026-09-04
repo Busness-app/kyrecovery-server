@@ -101,6 +101,10 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
 
+	// From here to the response this ID is ours: a retry of the same deposit waits and
+	// then finds a whole one, never a row whose file is still on its way.
+	defer s.idLocks.acquire(m.CapsuleID)()
+
 	// Fast path only. The row claimed by publishCapsule below is what actually decides.
 	existing, err := s.db.GetCapsule(ctx, m.CapsuleID)
 	if err != nil {
@@ -120,7 +124,13 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		RecoveryKeyID: m.RecoveryKeyID, EncapsulatedKey: m.EncapsulatedKey,
 		CreatedAt: m.CreatedAt, DepositedAt: now.UTC(), PairedAppID: app.ID, Status: "active",
 	}
-	if err := s.publishCapsule(ctx, rec, raw); err != nil {
+	record := func(ctx context.Context) error {
+		_, err := s.ledger.Record(ctx, "capsule_deposited", "paired-app:"+app.ID, rec.ID, map[string]interface{}{
+			"service_name": rec.ServiceName, "digest": digest, "size_bytes": rec.SizeBytes, "recovery_key_id": rec.RecoveryKeyID,
+		})
+		return err
+	}
+	if err := s.publishCapsule(ctx, rec, raw, record); err != nil {
 		if errors.Is(err, db.ErrCapsuleExists) {
 			// A concurrent deposit of the same ID won the row. Re-read it and answer as if
 			// the pre-check had seen it.
@@ -134,14 +144,18 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("deposit: publishing capsule %s: %v", rec.ID, err)
-		writeError(w, http.StatusInternalServerError, "Failed storing capsule")
+		switch {
+		case errors.Is(err, errDepositUnrecorded):
+			writeError(w, http.StatusServiceUnavailable, "Failed recording the deposit in the audit chain; deposit refused")
+		case errors.Is(err, errCapsuleFileExists):
+			writeError(w, http.StatusConflict, "A capsule file with this ID already exists")
+		default:
+			writeError(w, http.StatusInternalServerError, "Failed storing capsule")
+		}
 		return
 	}
 	_ = s.db.UpdateAppLastBackup(ctx, app.ID)
 	go s.replication.SyncAllAutoTargets(context.Background(), rec.ID)
-	_, _ = s.ledger.Record(ctx, "capsule_deposited", "paired-app:"+app.ID, rec.ID, map[string]interface{}{
-		"service_name": rec.ServiceName, "digest": digest, "size_bytes": rec.SizeBytes, "recovery_key_id": rec.RecoveryKeyID,
-	})
 	writeJSON(w, http.StatusCreated, depositResponse(&rec))
 }
 

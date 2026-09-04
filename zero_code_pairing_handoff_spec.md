@@ -159,7 +159,7 @@ The server, in order: authenticates the token; charges the rate limit; takes one
 `capsule.MaxContainerBytes` cap; parses the container with
 `capsule.ReadUnverifiedManifest`; compares `recovery_key_id` with the pinned key ID;
 compares `service_name` with the token's paired service; SHA-256s the bytes; writes
-temp-file → fsync → row insert → rename; appends `capsule_deposited`; and kicks off
+temp-file → fsync → row insert → `capsule_deposited` appended → hard link; and kicks off
 offsite replication.
 
 - **Limits**:
