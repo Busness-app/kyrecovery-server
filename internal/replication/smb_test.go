@@ -98,3 +98,51 @@ func TestSMBStalledServerReturnsWithinBudget(t *testing.T) {
 		t.Fatalf("took %s, budget was 2s", time.Since(start))
 	}
 }
+
+// Operators paste what their file manager shows. Every form must land on the
+// same host, share and directory.
+func TestNewSMBClientAcceptsUNCAndURLForms(t *testing.T) {
+	cases := []struct {
+		endpoint, share, dir string
+	}{
+		{"nas.lan", "Public", "capsules"},
+		{"nas.lan:1445", "Public", "capsules"},
+		{"//nas.lan/Public/", "", "capsules"},
+		{`\\nas.lan\Public\capsules`, "", ""},
+		{"smb://nas.lan/Public/capsules/", "", ""},
+		{"smb://nas.lan:1445/Public", "", "capsules"},
+	}
+	for _, c := range cases {
+		got := replication.NewSMBClient(c.endpoint, c.share, "ky", "pw", c.dir)
+		wantAddr := "nas.lan:445"
+		if strings.Contains(c.endpoint, "1445") {
+			wantAddr = "nas.lan:1445"
+		}
+		if got.Addr != wantAddr || got.Share != "Public" || got.Dir != "capsules" {
+			t.Errorf("%q share=%q dir=%q -> addr=%q share=%q dir=%q", c.endpoint, c.share, c.dir, got.Addr, got.Share, got.Dir)
+		}
+	}
+}
+
+// A pasted smb://user:password@host URL must be refused, not stored: Endpoint
+// is cleartext and copied into the audit ledger.
+func TestParseSMBEndpointRejectsUserinfo(t *testing.T) {
+	for _, ep := range []string{
+		"smb://ky:hunter2@nas.lan/Public",
+		"//ky@nas.lan/Public",
+		"smb://ky:pa/ss@nas.lan/Public",        // slash inside the password
+		`smb://CORP\ky:hunter2@nas.lan/Public`, // backslash in DOMAIN\user
+		"SMB://nas.lan:1445/Public",
+	} {
+		addr, share, dir, err := replication.ParseSMBEndpoint(ep, "", "")
+		if strings.Contains(ep, "@") {
+			if err == nil || addr != "" || share != "" || dir != "" {
+				t.Errorf("%q: want error and empty parts, got addr=%q share=%q dir=%q err=%v", ep, addr, share, dir, err)
+			}
+			continue
+		}
+		if err != nil || addr != "nas.lan:1445" || share != "Public" || dir != "" {
+			t.Errorf("%q: addr=%q share=%q dir=%q err=%v", ep, addr, share, dir, err)
+		}
+	}
+}
