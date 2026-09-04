@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		s.respondToDuplicate(w, existing, digest)
+		s.respondToDuplicate(ctx, w, existing, digest)
 		return
 	}
 
@@ -118,7 +119,7 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
 				return
 			}
-			s.respondToDuplicate(w, stored, digest)
+			s.respondToDuplicate(ctx, w, stored, digest)
 			return
 		}
 		log.Printf("deposit: publishing capsule %s: %v", rec.ID, err)
@@ -134,8 +135,19 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 }
 
 // respondToDuplicate answers a deposit whose ID is already stored: identical bytes are the
-// idempotent retry the products actually make, anything else is a collision.
-func (s *Server) respondToDuplicate(w http.ResponseWriter, stored *db.CapsuleRecord, digest string) {
+// idempotent retry the products actually make, anything else is a collision. A row whose file
+// is missing is a crash-orphaned insert (the rename never happened, or the file was lost after);
+// it is marked corrupt and refused so the product retries with a new ID instead of believing
+// the deposit already exists.
+func (s *Server) respondToDuplicate(ctx context.Context, w http.ResponseWriter, stored *db.CapsuleRecord, digest string) {
+	if _, err := os.Stat(stored.FilePath); err != nil {
+		if setErr := s.db.SetCapsuleStatus(ctx, stored.ID, "corrupt"); setErr != nil {
+			log.Printf("deposit: marking capsule %s corrupt: %v", stored.ID, setErr)
+		}
+		log.Printf("deposit: capsule %s has a row but no file on disk", stored.ID)
+		writeError(w, http.StatusConflict, "A capsule with this ID is recorded but its file is missing")
+		return
+	}
 	if stored.Digest == digest {
 		writeJSON(w, http.StatusOK, depositResponse(stored))
 		return

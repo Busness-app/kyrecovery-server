@@ -370,13 +370,19 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	capRec, err := s.db.GetCapsule(ctx, capsuleID)
-	if err != nil || capRec == nil {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed reading capsule record")
+		return
+	}
+	if capRec == nil {
 		writeError(w, http.StatusNotFound, "Capsule not found")
 		return
 	}
 
 	switch action {
 	case "download":
+		// A corrupt row is still downloadable for forensics; the header and the JSON
+		// detail both carry the status so a caller cannot mistake it for intact.
 		capsuleBytes, err := os.ReadFile(capRec.FilePath)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
@@ -385,7 +391,11 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.kycap", capsuleID))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Capsule-Digest", capRec.Digest)
+		w.Header().Set("X-Capsule-Status", capRec.Status)
 		w.Write(capsuleBytes)
+
+	case "verify":
+		s.handleCapsuleVerify(w, r, capRec)
 
 	default:
 		writeJSON(w, http.StatusOK, capRec)
@@ -1204,6 +1214,8 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
+
+	go s.runIntegritySweep(ctx)
 
 	errChan := make(chan error, 1)
 	go func() {

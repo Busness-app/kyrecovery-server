@@ -370,9 +370,15 @@ func (d *DB) InsertCapsule(ctx context.Context, c CapsuleRecord) error {
 	_, err := d.conn.ExecContext(ctx, q, c.ID, c.ServiceName, c.AppName, c.AppVersion, c.FilePath, c.SizeBytes,
 		c.Digest, c.PayloadHash, c.Threshold, c.TotalShares, c.RecoveryKeyID, c.EncapsulatedKey,
 		c.CreatedAt.UTC(), c.DepositedAt.UTC(), c.PairedAppID, c.Status)
-	if err != nil && strings.Contains(err.Error(), "constraint failed") {
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return ErrCapsuleExists
 	}
+	return err
+}
+
+// SetCapsuleStatus updates a capsule's status ("active" or "corrupt").
+func (d *DB) SetCapsuleStatus(ctx context.Context, id, status string) error {
+	_, err := d.conn.ExecContext(ctx, `UPDATE capsules SET status = ? WHERE id = ?`, status, id)
 	return err
 }
 

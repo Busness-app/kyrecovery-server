@@ -104,8 +104,9 @@ func (s *Server) publishCapsule(ctx context.Context, rec db.CapsuleRecord, capsu
 		return fmt.Errorf("failed recording capsule: %w", err)
 	}
 	if err := os.Rename(tmpPath, rec.FilePath); err != nil {
-		// The row is this request's, so releasing it is safe.
-		_ = s.db.DeleteCapsule(ctx, rec.ID)
+		// The row is this request's, so releasing it is safe. Run the rollback on an
+		// uncancelable context: a client that hung up must not leave a row with no file.
+		_ = s.db.DeleteCapsule(context.WithoutCancel(ctx), rec.ID)
 		cleanup()
 		return fmt.Errorf("failed publishing capsule file: %w", err)
 	}

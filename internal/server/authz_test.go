@@ -2,11 +2,14 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
 	"github.com/Busness-app/kyrecovery-server/internal/auth"
+	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
 
 // TestRequiredRolePolicy pins the authorization decision for every API route, for
@@ -95,6 +98,28 @@ func TestBodyLimits(t *testing.T) {
 	// The deposit carries a sealed container, and only the deposit.
 	if bodyLimit("/api/backup/deposit") != int64(capsule.MaxContainerBytes) {
 		t.Fatalf("the deposit must accept a whole container, got %d", bodyLimit("/api/backup/deposit"))
+	}
+}
+
+// A capsule lookup that fails for a DB reason (not "no such row") must not be reported
+// as 404: that tells an operator the capsule never existed when the store is actually
+// unable to answer.
+func TestCapsuleDetailDBErrorIsA500NotA404(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Port: 0, DataDir: t.TempDir()}, database, audit.NewLedger(database))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.Close() // GetCapsule now returns a DB error, not sql.ErrNoRows.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/capsules/cap-x", nil)
+	w := httptest.NewRecorder()
+	s.handleCapsuleDetail(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d %s, want 500", w.Code, w.Body.String())
 	}
 }
 

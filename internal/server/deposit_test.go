@@ -246,6 +246,44 @@ func TestConcurrentIdenticalDepositsStoreExactlyOneCapsule(t *testing.T) {
 	}
 }
 
+// TestDepositRefusesACrashOrphanedRow covers a row inserted (e.g. by a crash between the
+// insert and the rename in publishCapsule) whose file never made it to disk. A retry of the
+// same ID must not be told the deposit succeeded.
+func TestDepositRefusesACrashOrphanedRow(t *testing.T) {
+	srv, cookie, database := newAdminServer(t)
+	k, _ := recoverykey.Generate()
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	raw := sealFor(t, k.Public(), "kynotes")
+
+	m, err := capsule.ReadUnverifiedManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if err := database.InsertCapsule(t.Context(), db.CapsuleRecord{
+		ID: m.CapsuleID, ServiceName: m.ServiceName, AppVersion: m.AppVersion,
+		FilePath: filepath.Join(t.TempDir(), "missing.kycap"), SizeBytes: int64(len(raw)),
+		Digest: hex.EncodeToString(sum[:]), PayloadHash: m.PayloadHash, Threshold: m.Threshold,
+		TotalShares: m.TotalShares, RecoveryKeyID: m.RecoveryKeyID, EncapsulatedKey: m.EncapsulatedKey,
+		CreatedAt: m.CreatedAt, DepositedAt: time.Now().UTC(), Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := deposit(srv, token, raw)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("deposit of orphaned ID: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	after, err := database.GetCapsule(t.Context(), m.CapsuleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "corrupt" {
+		t.Fatalf("status %q, want corrupt", after.Status)
+	}
+}
+
 // seedRecoveryKey pins a recovery key straight into the database, for tests that only need
 // pairing to be possible and do not exercise the import route.
 func seedRecoveryKey(t *testing.T, database *db.DB) recoverykey.PublicKey {

@@ -84,6 +84,63 @@ func TestDatabaseOperations(t *testing.T) {
 	}
 }
 
+// InsertCapsule must classify a primary-key collision as ErrCapsuleExists so callers
+// can distinguish "already stored" from any other insert failure.
+func TestInsertCapsuleReportsDuplicateID(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer database.Close()
+
+	rec := db.CapsuleRecord{
+		ID: "cap-dup", ServiceName: "kysignon", FilePath: "/tmp/cap-dup.kycap",
+		SizeBytes: 1, PayloadHash: "h", Threshold: 2, TotalShares: 3,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	if err := database.InsertCapsule(ctx, rec); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if err := database.InsertCapsule(ctx, rec); err != db.ErrCapsuleExists {
+		t.Fatalf("second insert: got %v, want ErrCapsuleExists", err)
+	}
+}
+
+// publishCapsule's rollback runs DeleteCapsule on context.WithoutCancel(ctx) so a client
+// that disconnects mid-request cannot leave a row with no file. Confirms the mechanism this
+// depends on: the sqlite driver fails a query against an already-canceled context, and
+// context.WithoutCancel is what lets the rollback still run.
+func TestDeleteCapsuleSurvivesACanceledContext(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer database.Close()
+
+	rec := db.CapsuleRecord{
+		ID: "cap-cancel", ServiceName: "kysignon", FilePath: "/tmp/cap-cancel.kycap",
+		SizeBytes: 1, PayloadHash: "h", Threshold: 2, TotalShares: 3,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}
+	if err := database.InsertCapsule(context.Background(), rec); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := database.DeleteCapsule(ctx, rec.ID); err == nil {
+		t.Fatal("expected the canceled context itself to fail the query")
+	}
+	if err := database.DeleteCapsule(context.WithoutCancel(ctx), rec.ID); err != nil {
+		t.Fatalf("DeleteCapsule on context.WithoutCancel: %v", err)
+	}
+	if got, err := database.GetCapsule(context.Background(), rec.ID); err != nil || got != nil {
+		t.Fatalf("row still present after rollback: %+v, err=%v", got, err)
+	}
+}
+
 // Concurrent claims of one pairing code must mint exactly one token.
 func TestClaimPairingCodeIsSingleUseUnderRace(t *testing.T) {
 	ctx := context.Background()
