@@ -341,8 +341,9 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	// It reports only what it can see: how many sealed capsules it holds. The
 	// verify sweep is what will attest their integrity.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"capsule_count":   len(capsules),
-		"custodian_count": len(custodians),
+		"capsule_count":         len(capsules),
+		"custodian_count":       len(custodians),
+		"audit_append_disabled": s.ledger.Healthy() != nil,
 	})
 }
 
@@ -484,6 +485,14 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		resp["error"] = err.Error()
+	}
+	// A ledger that refuses to append is an operator emergency even when what
+	// remains of the log verifies, so it is reported either way.
+	if unhealthy := s.ledger.Healthy(); unhealthy != nil {
+		resp["append_disabled"] = true
+		if err == nil {
+			resp["error"] = unhealthy.Error()
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -37,3 +37,35 @@ func TestLedgerVerifiesAndDetectsTruncation(t *testing.T) {
 		t.Fatal("append succeeded on a chain that fails its anchor")
 	}
 }
+
+// Verify walks the log while the server keeps recording. Reading the anchor and the
+// rows without the ledger lock made a healthy chain look one record too long.
+func TestVerifyIsSafeAlongsideConcurrentRecords(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	l := audit.NewLedger(database)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			if _, err := l.Record(t.Context(), "capsule_deposited", "paired-app:x", "cap-1", nil); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for {
+		if _, err := l.Verify(t.Context()); err != nil {
+			t.Fatalf("verify raced an append: %v", err)
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+}

@@ -171,7 +171,7 @@ async function verifyAuditChain() {
       badge.textContent = `✓ Cryptographic Chain Verified (${data.count} events)`;
       badge.style.color = 'var(--accent-green)';
     } else {
-      badge.textContent = `✗ Chain Broken at Sequence ${data.broken_seq}: ${data.error}`;
+      badge.textContent = `✗ Chain Broken: ${data.error || 'verification failed'}`;
       badge.style.color = 'var(--accent-red)';
     }
   } catch (err) {

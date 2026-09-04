@@ -29,6 +29,8 @@ type Ledger struct {
 	key   []byte
 	chain *auditchain.Chain
 	err   error // set when the stored log does not match its anchor; every Record fails
+
+	lastPoisonLog time.Time // rate-limits the refusal log; a busy server would flood
 }
 
 // NewLedger initializes an audit ledger keyed by the database's server keyring,
@@ -73,6 +75,11 @@ func toRecord(ar db.AuditRecord) auditchain.Record {
 		Fields: []string{ar.Action, ar.Actor, ar.TargetID, ar.DetailsJSON, ar.CreatedAt}}
 }
 
+// Healthy reports why the ledger cannot append, or nil. The latch is set once in
+// NewLedger and never written again, so callers read it without the lock: taking
+// it would queue them behind an in-flight append.
+func (l *Ledger) Healthy() error { return l.err }
+
 // Record appends a new event to the chain and emits a structured log line.
 func (l *Ledger) Record(ctx context.Context, action, actor, targetID string, details map[string]interface{}) (*db.AuditRecord, error) {
 	if l.db == nil {
@@ -81,6 +88,11 @@ func (l *Ledger) Record(ctx context.Context, action, actor, targetID string, det
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.err != nil {
+		// Every caller discards this error, so the refusal has to be audible here.
+		if now := time.Now(); now.Sub(l.lastPoisonLog) > time.Minute {
+			l.lastPoisonLog = now
+			defaultLogger.Error(action, actor, targetID, "the audit ledger is not writable; this event was not recorded", l.err)
+		}
 		return nil, l.err
 	}
 
@@ -112,6 +124,13 @@ func (l *Ledger) Record(ctx context.Context, action, actor, targetID string, det
 // checked against. It does not page: kyrecovery's previous verifier read a fixed
 // 100000 rows and reported a gap on a healthy chain past that.
 func (l *Ledger) Verify(ctx context.Context) (auditchain.Anchor, error) {
+	if l.db == nil {
+		return auditchain.Anchor{}, nil
+	}
+	// The lock is held for the whole walk: an append landing between the anchor read
+	// and the last row makes a healthy chain look one record longer than its anchor.
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	count, hash, found, err := l.db.GetAuditAnchor(ctx)
 	if err != nil {
 		return auditchain.Anchor{}, err

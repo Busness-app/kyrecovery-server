@@ -52,6 +52,13 @@ func (s *Server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A blind store's audit trail is most of its evidence that a deposit happened.
+	// If the ledger cannot append, the deposit is refused rather than recorded nowhere.
+	if err := s.ledger.Healthy(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Audit ledger is not writable; deposits refused until an operator repairs it")
+		return
+	}
+
 	raw, err := io.ReadAll(r.Body) // MaxBytesReader in ServeHTTP caps this at capsule.MaxContainerBytes
 	if err != nil {
 		var tooLarge *http.MaxBytesError
