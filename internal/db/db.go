@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,17 +62,18 @@ type DrillRecord struct {
 	CompletedAt  time.Time `json:"completed_at"`
 }
 
-// AuditRecord represents a tamper-evident audit event.
+// AuditRecord represents one link of the tamper-evident audit chain. CreatedAt is
+// the RFC3339Nano string that was hashed into the record, stored verbatim: the
+// hashed bytes and the stored bytes are the same bytes.
 type AuditRecord struct {
-	ID          int64     `json:"id"`
-	SequenceNum int64     `json:"sequence_num"`
-	PrevHash    string    `json:"prev_hash"`
-	Action      string    `json:"action"`
-	Actor       string    `json:"actor"`
-	TargetID    string    `json:"target_id"`
-	DetailsJSON string    `json:"details_json"`
-	EventHash   string    `json:"event_hash"`
-	CreatedAt   time.Time `json:"created_at"`
+	Seq         uint64 `json:"sequence_num"`
+	PrevHash    string `json:"prev_hash"`
+	EventHash   string `json:"event_hash"`
+	Action      string `json:"action"`
+	Actor       string `json:"actor"`
+	TargetID    string `json:"target_id"`
+	DetailsJSON string `json:"details_json"`
+	CreatedAt   string `json:"created_at"`
 }
 
 // PairedAppRecord represents a connected KySecurity or Business.app service.
@@ -276,15 +278,20 @@ func (d *DB) migrate() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS audit_events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		sequence_num INTEGER NOT NULL UNIQUE,
+		seq INTEGER PRIMARY KEY,
 		prev_hash TEXT NOT NULL,
+		event_hash TEXT NOT NULL,
 		action TEXT NOT NULL,
 		actor TEXT NOT NULL,
 		target_id TEXT NOT NULL,
 		details_json TEXT NOT NULL,
-		event_hash TEXT NOT NULL,
-		created_at DATETIME NOT NULL
+		created_at TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS audit_anchor (
+		singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+		count INTEGER NOT NULL,
+		hash TEXT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS paired_apps (
@@ -352,7 +359,6 @@ func (d *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 	CREATE INDEX IF NOT EXISTS idx_capsules_service ON capsules(service_name);
 	CREATE INDEX IF NOT EXISTS idx_drills_capsule ON drills(capsule_id);
-	CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_events(sequence_num);
 	CREATE INDEX IF NOT EXISTS idx_paired_code ON paired_apps(pairing_code);
 	CREATE INDEX IF NOT EXISTS idx_paired_token ON paired_apps(api_token);
 	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -503,12 +509,18 @@ func (d *DB) GetLastDrill(ctx context.Context) (*DrillRecord, error) {
 	return &list[0], nil
 }
 
+const auditCols = `seq, prev_hash, event_hash, action, actor, target_id, details_json, created_at`
+
+func scanAuditEvent(sc interface{ Scan(...any) error }) (AuditRecord, error) {
+	var ar AuditRecord
+	err := sc.Scan(&ar.Seq, &ar.PrevHash, &ar.EventHash, &ar.Action, &ar.Actor, &ar.TargetID, &ar.DetailsJSON, &ar.CreatedAt)
+	return ar, err
+}
+
 // GetLastAuditEvent returns the latest audit record or nil if empty.
 func (d *DB) GetLastAuditEvent(ctx context.Context) (*AuditRecord, error) {
-	q := `SELECT id, sequence_num, prev_hash, action, actor, target_id, details_json, event_hash, created_at FROM audit_events ORDER BY sequence_num DESC LIMIT 1`
-	row := d.conn.QueryRowContext(ctx, q)
-	var ar AuditRecord
-	err := row.Scan(&ar.ID, &ar.SequenceNum, &ar.PrevHash, &ar.Action, &ar.Actor, &ar.TargetID, &ar.DetailsJSON, &ar.EventHash, &ar.CreatedAt)
+	row := d.conn.QueryRowContext(ctx, `SELECT `+auditCols+` FROM audit_events ORDER BY seq DESC LIMIT 1`)
+	ar, err := scanAuditEvent(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -518,30 +530,69 @@ func (d *DB) GetLastAuditEvent(ctx context.Context) (*AuditRecord, error) {
 	return &ar, nil
 }
 
-// InsertAuditEvent inserts a new chained audit event.
-func (d *DB) InsertAuditEvent(ctx context.Context, ar AuditRecord) error {
-	q := `INSERT INTO audit_events (sequence_num, prev_hash, action, actor, target_id, details_json, event_hash, created_at)
-	      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := d.conn.ExecContext(ctx, q, ar.SequenceNum, ar.PrevHash, ar.Action, ar.Actor, ar.TargetID, ar.DetailsJSON, ar.EventHash, ar.CreatedAt.UTC())
-	return err
+// InsertAuditEventAndAnchor stores an event and the anchor it produced in one
+// transaction: a record without its anchor, or an anchor without its record,
+// leaves the chain unable to say where its end is.
+func (d *DB) InsertAuditEventAndAnchor(ctx context.Context, ar AuditRecord, count uint64, hash string) error {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events (`+auditCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ar.Seq, ar.PrevHash, ar.EventHash, ar.Action, ar.Actor, ar.TargetID, ar.DetailsJSON, ar.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_anchor (singleton, count, hash) VALUES (1, ?, ?)
+	      ON CONFLICT(singleton) DO UPDATE SET count = excluded.count, hash = excluded.hash`, count, hash); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// UpdateAuditEventHashes rewrites the chain linkage of an existing audit event.
-// It changes no event content: it is used only to re-authenticate an existing
-// chain under the server ledger key.
-func (d *DB) UpdateAuditEventHashes(ctx context.Context, seq int64, prevHash, eventHash string) error {
-	q := `UPDATE audit_events SET prev_hash = ?, event_hash = ? WHERE sequence_num = ?`
-	_, err := d.conn.ExecContext(ctx, q, prevHash, eventHash, seq)
-	return err
+// GetAuditAnchor returns the stored chain length and head. found is false before
+// the first event is recorded.
+func (d *DB) GetAuditAnchor(ctx context.Context) (count uint64, hash string, found bool, err error) {
+	row := d.conn.QueryRowContext(ctx, `SELECT count, hash FROM audit_anchor WHERE singleton = 1`)
+	err = row.Scan(&count, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return count, hash, true, nil
 }
 
-// ListAuditEvents returns audit events in chronological or reverse-chronological order.
+// IterAuditEvents yields the whole log ascending. Verification cannot page: a
+// fixed window reports a gap on a healthy chain once the log outgrows it.
+func (d *DB) IterAuditEvents(ctx context.Context) iter.Seq2[AuditRecord, error] {
+	return func(yield func(AuditRecord, error) bool) {
+		rows, err := d.conn.QueryContext(ctx, `SELECT `+auditCols+` FROM audit_events ORDER BY seq ASC`)
+		if err != nil {
+			yield(AuditRecord{}, err)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			ar, err := scanAuditEvent(rows)
+			if !yield(ar, err) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(AuditRecord{}, err)
+		}
+	}
+}
+
+// ListAuditEvents returns the most recent audit events, newest first, for display.
 func (d *DB) ListAuditEvents(ctx context.Context, limit int) ([]AuditRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	q := `SELECT id, sequence_num, prev_hash, action, actor, target_id, details_json, event_hash, created_at FROM audit_events ORDER BY sequence_num DESC LIMIT ?`
-	rows, err := d.conn.QueryContext(ctx, q, limit)
+	rows, err := d.conn.QueryContext(ctx, `SELECT `+auditCols+` FROM audit_events ORDER BY seq DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -549,13 +600,20 @@ func (d *DB) ListAuditEvents(ctx context.Context, limit int) ([]AuditRecord, err
 
 	var list []AuditRecord
 	for rows.Next() {
-		var ar AuditRecord
-		if err := rows.Scan(&ar.ID, &ar.SequenceNum, &ar.PrevHash, &ar.Action, &ar.Actor, &ar.TargetID, &ar.DetailsJSON, &ar.EventHash, &ar.CreatedAt); err != nil {
+		ar, err := scanAuditEvent(rows)
+		if err != nil {
 			return nil, err
 		}
 		list = append(list, ar)
 	}
 	return list, rows.Err()
+}
+
+// DeleteAuditEventForTest removes one audit event. It exists for tests that need
+// a damaged log; nothing in production calls it.
+func (d *DB) DeleteAuditEventForTest(ctx context.Context, seq uint64) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM audit_events WHERE seq = ?`, seq)
+	return err
 }
 
 // InsertPairedApp stores a pending pairing code record.

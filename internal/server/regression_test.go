@@ -127,7 +127,7 @@ func TestFailedLoginCannotChooseTheAuditActor(t *testing.T) {
 	}
 	for _, e := range events {
 		if e.Actor == payload {
-			t.Errorf("audit row #%d records an anonymous caller's string as the actor: %q", e.SequenceNum, e.Actor)
+			t.Errorf("audit row #%d records an anonymous caller's string as the actor: %q", e.Seq, e.Actor)
 		}
 	}
 	// The attempt is still auditable — the claimed name is kept as a claim.

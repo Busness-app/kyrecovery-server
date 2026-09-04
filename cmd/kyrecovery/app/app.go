@@ -170,14 +170,14 @@ func cmdAudit(args []string) {
 	defer database.Close()
 
 	ledger := audit.NewLedger(database)
-	status, err := ledger.VerifyChain(context.Background())
-	if err != nil || !status.Valid {
+	anchor, err := ledger.Verify(context.Background())
+	if err != nil {
 		fmt.Printf("✗ Audit Chain Broken: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ Cryptographic Audit Chain Valid (%d events verified)\n", status.Count)
-	fmt.Printf("  Latest Hash: %s\n", status.LastHash)
+	fmt.Printf("✓ Cryptographic Audit Chain Valid (%d events verified)\n", anchor.Count)
+	fmt.Printf("  Latest Hash: %s\n", anchor.Hash)
 }
 
 // 3. Pair

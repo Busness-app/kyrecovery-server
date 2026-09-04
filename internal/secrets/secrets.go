@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -29,10 +28,6 @@ const EnvKey = "KYRECOVERY_SECRET_KEY"
 const KeyFileName = "secret.key"
 
 const sealedPrefix = "enc:v1:"
-
-// KeyedMarkerName records that the audit ledger has been re-keyed, so unkeyed
-// event hashes are never accepted again.
-const KeyedMarkerName = "ledger.keyed"
 
 // Keyring derives purpose-specific keys from a single 256-bit server key.
 type Keyring struct {
@@ -57,30 +52,6 @@ func Load(dataDir string) (*Keyring, error) {
 		return nil, err
 	}
 	return &Keyring{master: key, dir: dataDir}, nil
-}
-
-// LedgerKeyed reports whether the audit ledger is known to be fully keyed. A
-// keyring with nowhere to persist state (an in-memory database) is treated as
-// keyed: there is no pre-existing chain to migrate.
-func (k *Keyring) LedgerKeyed() bool {
-	if k.dir == "" {
-		return true
-	}
-	_, err := os.Stat(filepath.Join(k.dir, KeyedMarkerName))
-	return err == nil
-}
-
-// MarkLedgerKeyed records, outside the database, that every audit event is
-// authenticated with the ledger key.
-func (k *Keyring) MarkLedgerKeyed() error {
-	if k.dir == "" {
-		return nil
-	}
-	path := filepath.Join(k.dir, KeyedMarkerName)
-	if err := os.WriteFile(path, []byte("1\n"), 0600); err != nil {
-		return fmt.Errorf("failed marking ledger as keyed: %w", err)
-	}
-	return nil
 }
 
 // Ephemeral returns a keyring backed by a random key that is never persisted.

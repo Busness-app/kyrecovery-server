@@ -476,11 +476,11 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	status, err := s.ledger.VerifyChain(r.Context())
+	anchor, err := s.ledger.Verify(r.Context())
 	resp := map[string]interface{}{
-		"valid":     status.Valid,
-		"count":     status.Count,
-		"last_hash": status.LastHash,
+		"valid":     err == nil,
+		"count":     anchor.Count,
+		"last_hash": anchor.Hash,
 	}
 	if err != nil {
 		resp["error"] = err.Error()
