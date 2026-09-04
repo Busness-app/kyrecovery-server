@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,7 +34,24 @@ const (
 
 	// maxPairingTTL caps how long a six-digit code stays guessable.
 	maxPairingTTL = 60 * time.Minute
+
+	// capsuleTransferBudget is how long one deposit or download may take end to end.
+	// A whole container at capsule.MaxContainerBytes needs roughly 430 KiB/s to finish
+	// inside it — slow enough to survive a bad link, short enough to bound a stuck peer.
+	capsuleTransferBudget = 15 * time.Minute
 )
+
+// setDeadline gives one request its own clock. The listener sets no ReadTimeout or
+// WriteTimeout, because a capsule transfer has no size a fixed timeout could fit; the
+// routes that move one take a budget here instead of running unbounded. Not every
+// ResponseWriter supports deadlines (httptest.ResponseRecorder does not), and one that
+// does not is not a request failure.
+func setDeadline(w http.ResponseWriter, d time.Duration) {
+	rc := http.NewResponseController(w)
+	at := time.Now().Add(d)
+	_ = rc.SetReadDeadline(at)
+	_ = rc.SetWriteDeadline(at)
+}
 
 // serviceNamePattern is what may appear in a capsule ID, and therefore in a
 // capsule filename. Self-declared pushes choose their own service name, so this

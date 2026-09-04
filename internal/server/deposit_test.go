@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,6 +146,17 @@ func TestDepositAcceptsACapsuleSealedToThePinnedKey(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), raw) || rec.Header().Get("X-Capsule-Digest") != resp.Digest {
 		t.Fatalf("download: %d digest=%q", rec.Code, rec.Header().Get("X-Capsule-Digest"))
+	}
+	// Sealed bytes leaving the store is an auditable event.
+	events, _ := database.ListAuditEvents(t.Context(), 50)
+	downloaded := false
+	for _, e := range events {
+		if e.Action == "capsule_downloaded" && e.TargetID == resp.CapsuleID {
+			downloaded = true
+		}
+	}
+	if !downloaded {
+		t.Fatalf("download was not recorded in the audit chain: %+v", events)
 	}
 }
 
@@ -300,4 +312,48 @@ func seedRecoveryKey(t *testing.T, database *db.DB) recoverykey.PublicKey {
 		t.Fatal(err)
 	}
 	return pub
+}
+
+// A deposit carries a whole sealed container, so the read runs on the route's own
+// budget. A listener-wide ReadTimeout would cut a slow upload off mid-body and the
+// product would see a misleading 400 instead of finishing. The timeout here is far
+// shorter than a real one so the proof fits in a unit test.
+func TestSlowDepositOutlivesTheListenerReadTimeout(t *testing.T) {
+	srv, cookie, _ := newAdminServer(t)
+	k, _ := recoverykey.Generate()
+	importKey(t, srv, cookie, k.Public(), 3, 5)
+	token, _ := pairProduct(t, srv, cookie, "kynotes")
+	raw := sealFor(t, k.Public(), "kynotes")
+
+	ts := httptest.NewUnstartedServer(srv)
+	ts.Config.ReadTimeout = 150 * time.Millisecond
+	ts.Start()
+	defer ts.Close()
+
+	pr, pw := io.Pipe()
+	go func() {
+		chunk := (len(raw) + 3) / 4
+		for off := 0; off < len(raw); off += chunk {
+			time.Sleep(100 * time.Millisecond) // 4 chunks: the body takes ~400ms
+			if _, err := pw.Write(raw[off:min(off+chunk, len(raw))]); err != nil {
+				break
+			}
+		}
+		pw.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/backup/deposit", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("slow deposit failed to complete: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("slow deposit: %d %s", resp.StatusCode, body)
+	}
 }

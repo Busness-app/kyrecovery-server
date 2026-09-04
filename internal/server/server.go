@@ -411,16 +411,29 @@ func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 	case "download":
 		// A corrupt row is still downloadable for forensics; the header and the JSON
 		// detail both carry the status so a caller cannot mistake it for intact.
-		capsuleBytes, err := os.ReadFile(capRec.FilePath)
+		f, err := os.Open(capRec.FilePath)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
 			return
 		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Capsule file unreadable on disk")
+			return
+		}
+		// Taking sealed bytes off the store is an event an operator must be able to see later.
+		_, _ = s.ledger.Record(ctx, "capsule_downloaded", s.actor(r), capRec.ID, map[string]interface{}{
+			"digest": capRec.Digest, "status": capRec.Status, "size_bytes": info.Size(),
+		})
+		setDeadline(w, capsuleTransferBudget)
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.kycap", capsuleID))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Capsule-Digest", capRec.Digest)
 		w.Header().Set("X-Capsule-Status", capRec.Status)
-		w.Write(capsuleBytes)
+		// Streamed: a container may be up to capsule.MaxContainerBytes, which is not a
+		// thing to hold in memory once per concurrent download.
+		http.ServeContent(w, r, "", info.ModTime(), f)
 
 	case "verify":
 		s.handleCapsuleVerify(w, r, capRec)
@@ -1244,11 +1257,14 @@ func (s *Server) handleCapsuleTimeline(w http.ResponseWriter, r *http.Request) {
 // Start runs the HTTP listener until context cancellation.
 func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.cfg.Port)
+	// No server-wide ReadTimeout or WriteTimeout: a deposit or a download may legitimately
+	// move up to capsule.MaxContainerBytes, which no fixed clock can size. Headers still get
+	// one, and the two capsule routes set their own budget per request (see setDeadline).
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      s,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:              addr,
+		Handler:           s,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go s.runIntegritySweep(ctx)
