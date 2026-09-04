@@ -73,7 +73,9 @@ func (c *SMBClient) budget(ctx context.Context) (context.Context, context.Cancel
 	return context.WithTimeout(ctx, t)
 }
 
-// Put streams data to Dir/name inside the share, creating Dir if needed.
+// Put streams data to Dir/name inside the share, creating Dir if needed. The
+// bytes land in a temporary name and are renamed into place, so an aborted
+// transfer never replaces a complete replica with a short one.
 func (c *SMBClient) Put(ctx context.Context, name string, data io.Reader) error {
 	ctx, cancel := c.budget(ctx)
 	defer cancel()
@@ -87,15 +89,23 @@ func (c *SMBClient) Put(ctx context.Context, name string, data io.Reader) error 
 			return err
 		}
 	}
-	f, err := share.Create(path.Join(c.Dir, name))
+	final := path.Join(c.Dir, name)
+	tmp := final + ".part"
+	f, err := share.Create(tmp)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(f, data); err != nil {
 		f.Close()
+		share.Remove(tmp)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		share.Remove(tmp)
+		return err
+	}
+	share.Remove(final) // SMB rename does not replace an existing file
+	return share.Rename(tmp, final)
 }
 
 // TestConnection authenticates, mounts the share and proves Dir is writable.

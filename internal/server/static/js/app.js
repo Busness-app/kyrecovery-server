@@ -680,6 +680,7 @@ function applyReplicationPreset() {
   const label = (id, text) => { document.getElementById(id).textContent = text; };
 
   show('repl-host-key-group', preset === 'sftp');
+  show('repl-smb-warning', preset === 'smb');
   show('repl-bucket-group', preset !== 'sftp');
   show('repl-region-group', preset !== 'sftp' && preset !== 'smb');
   label('repl-bucket-label', preset === 'smb' ? 'Share Name' : 'Bucket Name');

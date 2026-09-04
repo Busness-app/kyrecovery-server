@@ -416,6 +416,12 @@
               <input id="repl-secret-key" class="form-input" type="password" placeholder="Secret access key">
             </div>
           </div>
+          <div id="repl-smb-warning" style="display: none; font-size: 13px; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; background: var(--bg-input); color: var(--accent-yellow, #e0b040);">
+            SMB cannot verify the server's identity: a host that answers on this address and grants a guest session
+            is accepted unsigned, can swallow uploads while the sync log records success, and sees the NTLMv2 exchange
+            for this credential. Use a strong password on a trusted network, or mount the share on the host and add it
+            as a Local Directory target, which does not have this gap. See README, "Replication".
+          </div>
           <div class="form-group" id="repl-host-key-group" style="display: none;">
             <label class="form-label">Server Host Key (SHA256 fingerprint)</label>
             <input id="repl-host-key" class="form-input" type="text" placeholder="Press Test Connection to fetch, then confirm it matches the server">

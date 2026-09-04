@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,10 @@ import (
 const sftpUser, sftpPass = "ky", "correct-horse"
 
 // seenPasswords records every password the test server was offered.
-var seenPasswords []string
+var (
+	seenMu        sync.Mutex
+	seenPasswords []string
+)
 
 // startSFTPServer runs a password-authenticated SSH server with the sftp
 // subsystem on a loopback port, serving the real filesystem.
@@ -40,7 +44,9 @@ func startSFTPServer(t *testing.T) (addr, fingerprint string) {
 	}
 	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			seenMu.Lock()
 			seenPasswords = append(seenPasswords, string(pw))
+			seenMu.Unlock()
 			if c.User() == sftpUser && string(pw) == sftpPass {
 				return nil, nil
 			}
@@ -151,6 +157,15 @@ func TestSFTPReplication(t *testing.T) {
 	if err != nil || string(data) != "mock-encrypted-capsule-content" {
 		t.Fatalf("replicated file mismatch or missing: %v", err)
 	}
+
+	// A second sync must replace the existing replica and leave no part file.
+	if _, err := mgr.SyncCapsule(ctx, capID, target.ID); err != nil {
+		t.Fatalf("second SyncCapsule failed: %v", err)
+	}
+	entries, _ := os.ReadDir(vault)
+	if len(entries) != 1 || entries[0].Name() != capID+".kycap" {
+		t.Fatalf("vault should hold exactly the replica, got %v", entries)
+	}
 }
 
 func TestSFTPRefusesMismatchedHostKey(t *testing.T) {
@@ -194,10 +209,14 @@ func TestSFTPNeverSendsPrivateKeyAsPassword(t *testing.T) {
 	}
 	// A key pasted from a file often arrives with leading whitespace.
 	secret := "\n" + string(pem.EncodeToMemory(block))
+	seenMu.Lock()
 	seenPasswords = nil
+	seenMu.Unlock()
 
 	client := replication.NewSFTPClient(addr, sftpUser, secret, t.TempDir(), fp)
 	_ = client.TestConnection(context.Background()) // auth fails: server has no pubkey callback
+	seenMu.Lock()
+	defer seenMu.Unlock()
 	for _, pw := range seenPasswords {
 		if strings.Contains(pw, "PRIVATE KEY") {
 			t.Fatal("private key was offered to the server as a password")

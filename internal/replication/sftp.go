@@ -107,7 +107,9 @@ func (c *SFTPClient) budget(ctx context.Context) (context.Context, context.Cance
 	return context.WithTimeout(ctx, t)
 }
 
-// Put streams data to Dir/name, creating Dir if needed.
+// Put streams data to Dir/name, creating Dir if needed. The bytes land in a
+// temporary name and are renamed into place, so an aborted transfer never
+// replaces a complete replica with a short one.
 func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error {
 	ctx, cancel := c.budget(ctx)
 	defer cancel()
@@ -119,15 +121,22 @@ func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error
 	if err := client.MkdirAll(c.Dir); err != nil {
 		return err
 	}
-	f, err := client.Create(path.Join(c.Dir, name))
+	final := path.Join(c.Dir, name)
+	tmp := final + ".part"
+	f, err := client.Create(tmp)
 	if err != nil {
 		return err
 	}
 	if _, err := f.ReadFrom(data); err != nil {
 		f.Close()
+		client.Remove(tmp)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		client.Remove(tmp)
+		return err
+	}
+	return client.PosixRename(tmp, final)
 }
 
 // TestConnection authenticates and proves Dir is writable.
