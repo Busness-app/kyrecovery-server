@@ -50,20 +50,18 @@ async function loadReadiness() {
     if (!res.ok) return;
     const data = await res.json();
 
-    document.getElementById('metric-readiness').textContent = data.ready ? '100%' : 'NOT READY';
-    document.getElementById('metric-readiness').style.color = data.ready ? 'var(--accent-green)' : 'var(--accent-amber)';
+    const capsuleCount = Number(data.capsule_count) || 0;
+    document.getElementById('metric-capsules').textContent = capsuleCount;
+    document.getElementById('metric-custodians').textContent = Number(data.custodian_count) || 0;
 
-    document.getElementById('metric-capsules').textContent = data.capsules_count || 0;
-    document.getElementById('metric-custodians').textContent = data.custodians_count || 0;
-
+    // The pill states a fact the store can check. It must never imply a verified
+    // restore: nothing here can open a capsule.
     const statusPill = document.getElementById('system-status-pill');
-    if (data.ready) {
-      statusPill.className = 'status-pill ready';
-      statusPill.innerHTML = '<span class="dot"></span> READY';
-    } else {
-      statusPill.className = 'status-pill warning';
-      statusPill.innerHTML = '<span class="dot"></span> VERIFICATION NEEDED';
-    }
+    const dot = '<span class="dot"></span> ';
+    statusPill.className = capsuleCount > 0 ? 'status-pill ready' : 'status-pill warning';
+    statusPill.innerHTML = capsuleCount > 0
+      ? dot + capsuleCount + ' CAPSULE' + (capsuleCount === 1 ? '' : 'S') + ' STORED'
+      : dot + 'NO CAPSULES STORED';
   } catch (err) {
     console.error('Error fetching readiness:', err);
   }

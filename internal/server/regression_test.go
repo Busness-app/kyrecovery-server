@@ -212,7 +212,7 @@ func TestSessionTokenNeverAppearsInAResponseBody(t *testing.T) {
 	srv, database := newTestServer(t)
 	c := sessionCookie(t, database, auth.RoleAdmin)
 
-	for _, path := range []string{"/api/auth/me", "/api/readiness", "/api/capsules", "/api/audit", "/api/ceremonies"} {
+	for _, path := range []string{"/api/auth/me", "/api/readiness", "/api/capsules", "/api/audit", "/api/custodians"} {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.AddCookie(c)
@@ -293,7 +293,7 @@ func TestEmbeddedDashboardEscapesEveryInnerHTMLSink(t *testing.T) {
 	safe := regexp.MustCompile(`^\s*(esc|escJs|Number|encodeURIComponent)\(|^\s*[a-zA-Z_.]+\s*(===|!==|\?)|^\s*\(|^\s*pct\b|^\s*color\b|^\s*pillClass\b|^\s*checksHtml\b|^\s*participantsStr\b|^\s*optionsHTML\b|^\s*new Date\(`)
 
 	templates := htmlTemplates(js)
-	if len(templates) < 6 {
+	if len(templates) < 7 {
 		t.Fatalf("only found %d HTML templates; the scanner is not reading the file it thinks it is", len(templates))
 	}
 	for _, block := range templates {

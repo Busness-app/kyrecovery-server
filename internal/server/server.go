@@ -329,12 +329,12 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	capsules, _ := s.db.ListCapsules(ctx)
 	custodians, _ := s.db.ListCustodians(ctx)
 
-	// A blind store cannot verify a capsule by opening it, so readiness stops at
-	// holding one. Task 4's signature check is what will make this mean more.
+	// A blind store cannot open a capsule, so it cannot report a verified restore.
+	// It reports only what it can see: how many sealed capsules it holds. The
+	// verify sweep is what will attest their integrity.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ready":            len(capsules) > 0,
-		"capsules_count":   len(capsules),
-		"custodians_count": len(custodians),
+		"capsule_count":   len(capsules),
+		"custodian_count": len(custodians),
 	})
 }
 
@@ -352,7 +352,7 @@ func (s *Server) handleCapsules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// 4. Capsule Detail / Download / Export
+// 4. Capsule Detail / Download
 func (s *Server) handleCapsuleDetail(w http.ResponseWriter, r *http.Request) {
 	capsuleID, action := parseCapsulePath(r.URL.Path)
 	if capsuleID == "" {
@@ -1199,5 +1199,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// Close releases background workers owned by the server. It is safe to call twice.
+// Close releases background workers owned by the server. Nothing owns one today —
+// the ceremony manager that did is gone — but Start still calls it on shutdown, so
+// the hook stays rather than being reintroduced by whatever acquires one next.
 func (s *Server) Close() {}
