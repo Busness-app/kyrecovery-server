@@ -58,6 +58,14 @@ func (m *Manager) SyncCapsule(ctx context.Context, capsuleID, targetID string) (
 		key := fmt.Sprintf("%s%s.kycap", strings.TrimPrefix(target.Prefix, "/"), capRec.ID)
 		transferErr = s3Client.PutObject(ctx, key, capFile, sizeBytes, "application/octet-stream")
 
+	case "sftp":
+		client := NewSFTPClient(target.Endpoint, target.AccessKey, target.SecretKey, target.Prefix, target.HostKey)
+		transferErr = client.Put(ctx, capRec.ID+".kycap", capFile)
+
+	case "smb":
+		client := NewSMBClient(target.Endpoint, target.Bucket, target.AccessKey, target.SecretKey, target.Prefix)
+		transferErr = client.Put(ctx, capRec.ID+".kycap", capFile)
+
 	case "local":
 		destPath := filepath.Join(target.Endpoint, fmt.Sprintf("%s.kycap", capRec.ID))
 		if err := os.MkdirAll(filepath.Dir(destPath), 0700); err != nil {
@@ -140,6 +148,10 @@ func (m *Manager) TestTarget(ctx context.Context, target db.ReplicationTargetRec
 	case "s3":
 		s3Client := NewS3Client(target.Endpoint, target.Bucket, target.Region, target.AccessKey, target.SecretKey)
 		return s3Client.TestConnection(ctx)
+	case "sftp":
+		return NewSFTPClient(target.Endpoint, target.AccessKey, target.SecretKey, target.Prefix, target.HostKey).TestConnection(ctx)
+	case "smb":
+		return NewSMBClient(target.Endpoint, target.Bucket, target.AccessKey, target.SecretKey, target.Prefix).TestConnection(ctx)
 	case "local":
 		if err := os.MkdirAll(target.Endpoint, 0700); err != nil {
 			return err
