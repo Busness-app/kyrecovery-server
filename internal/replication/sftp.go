@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,11 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
+
+// defaultTransferBudget bounds one whole Put or TestConnection, dial included.
+// A target that accepts the TCP connection and then stalls must not pin a
+// goroutine and the capsule's file handle forever.
+const defaultTransferBudget = 5 * time.Minute
 
 // UnknownHostKeyError is returned when a target has no pinned host key. It
 // carries the server's fingerprint so the operator can pin it deliberately.
@@ -28,7 +34,8 @@ type SFTPClient struct {
 	User    string
 	Secret  string // password, or a PEM private key
 	Dir     string
-	HostKey string // "SHA256:..." as printed by ssh-keygen -l
+	HostKey string        // "SHA256:..." as printed by ssh-keygen -l
+	Timeout time.Duration // whole-operation budget; zero means defaultTransferBudget
 }
 
 func NewSFTPClient(addr, user, secret, dir, hostKey string) *SFTPClient {
@@ -38,21 +45,29 @@ func NewSFTPClient(addr, user, secret, dir, hostKey string) *SFTPClient {
 	return &SFTPClient{Addr: addr, User: user, Secret: secret, Dir: strings.TrimSuffix(dir, "/"), HostKey: hostKey}
 }
 
-func (c *SFTPClient) dial() (*ssh.Client, *sftp.Client, error) {
-	var auth ssh.AuthMethod
-	if strings.HasPrefix(c.Secret, "-----BEGIN") {
+// auth picks key or password by PEM structure, never by prefix: a private key
+// with stray leading whitespace must not be sent to the server as a password.
+func (c *SFTPClient) auth() (ssh.AuthMethod, error) {
+	if block, _ := pem.Decode([]byte(c.Secret)); block != nil {
 		signer, err := ssh.ParsePrivateKey([]byte(c.Secret))
 		if err != nil {
-			return nil, nil, fmt.Errorf("private key: %w", err)
+			return nil, fmt.Errorf("private key: %w", err)
 		}
-		auth = ssh.PublicKeys(signer)
-	} else {
-		auth = ssh.Password(c.Secret)
+		return ssh.PublicKeys(signer), nil
+	}
+	return ssh.Password(c.Secret), nil
+}
+
+// dial returns a connected SFTP session and a cleanup that closes it. The
+// connection is torn down when ctx ends, which unblocks any stalled I/O.
+func (c *SFTPClient) dial(ctx context.Context) (*sftp.Client, func(), error) {
+	auth, err := c.auth()
+	if err != nil {
+		return nil, nil, err
 	}
 	cfg := &ssh.ClientConfig{
-		User:    c.User,
-		Auth:    []ssh.AuthMethod{auth},
-		Timeout: 60 * time.Second,
+		User: c.User,
+		Auth: []ssh.AuthMethod{auth},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			fp := ssh.FingerprintSHA256(key)
 			if c.HostKey == "" {
@@ -64,26 +79,43 @@ func (c *SFTPClient) dial() (*ssh.Client, *sftp.Client, error) {
 			return nil
 		},
 	}
-	conn, err := ssh.Dial("tcp", c.Addr, cfg)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", c.Addr)
 	if err != nil {
 		return nil, nil, err
 	}
-	client, err := sftp.NewClient(conn)
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	cleanup := func() { stop(); conn.Close() }
+
+	sconn, chans, reqs, err := ssh.NewClientConn(conn, c.Addr, cfg)
 	if err != nil {
-		conn.Close()
+		cleanup()
 		return nil, nil, err
 	}
-	return conn, client, nil
+	client, err := sftp.NewClient(ssh.NewClient(sconn, chans, reqs))
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return client, func() { client.Close(); cleanup() }, nil
+}
+
+func (c *SFTPClient) budget(ctx context.Context) (context.Context, context.CancelFunc) {
+	t := c.Timeout
+	if t == 0 {
+		t = defaultTransferBudget
+	}
+	return context.WithTimeout(ctx, t)
 }
 
 // Put streams data to Dir/name, creating Dir if needed.
 func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error {
-	conn, client, err := c.dial()
+	ctx, cancel := c.budget(ctx)
+	defer cancel()
+	client, cleanup, err := c.dial(ctx)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	defer client.Close()
+	defer cleanup()
 	if err := client.MkdirAll(c.Dir); err != nil {
 		return err
 	}
@@ -100,12 +132,13 @@ func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error
 
 // TestConnection authenticates and proves Dir is writable.
 func (c *SFTPClient) TestConnection(ctx context.Context) error {
-	conn, client, err := c.dial()
+	ctx, cancel := c.budget(ctx)
+	defer cancel()
+	client, cleanup, err := c.dial(ctx)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	defer client.Close()
+	defer cleanup()
 	if err := client.MkdirAll(c.Dir); err != nil {
 		return err
 	}

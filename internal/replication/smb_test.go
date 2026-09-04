@@ -11,6 +11,7 @@ import (
 	"github.com/hirochachacha/go-smb2"
 
 	"github.com/Busness-app/kyrecovery-server/internal/db"
+	"github.com/Busness-app/kyrecovery-server/internal/replication"
 )
 
 // SMB has no in-process server in Go, so this runs only when CI (or a
@@ -82,5 +83,18 @@ func TestSMBRejectsBadPassword(t *testing.T) {
 	_, mgr, _ := newCapsuleFixture(t)
 	if err := mgr.TestTarget(context.Background(), target); err == nil {
 		t.Fatal("TestTarget accepted a bad password")
+	}
+}
+
+func TestSMBStalledServerReturnsWithinBudget(t *testing.T) {
+	client := replication.NewSMBClient(stalledListener(t), "vault", "ky", "pw", "dir")
+	client.Timeout = 2 * time.Second
+	start := time.Now()
+	err := client.Put(context.Background(), "a.kycap", strings.NewReader("x"))
+	if err == nil {
+		t.Fatal("expected an error from a stalled server")
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatalf("took %s, budget was 2s", time.Since(start))
 	}
 }

@@ -97,7 +97,13 @@ here. Target types:
   of an unknown server, the operator confirms it against `ssh-keygen -lf` and
   saves it, and a later mismatch refuses to connect. No pin, no connection.
 - `smb`: a Windows or Samba share over SMB 2 or 3, never SMB1. The user may be
-  `DOMAIN\user`. Signing is on; encryption follows the share's requirement.
+  `DOMAIN\user`. The client requires message signing. Known limitation: the
+  SMB library accepts a server that grants a *guest* session, unsigned, so a
+  host impersonating the share can swallow uploads while the sync log records
+  success and can observe the NTLMv2 exchange. Give the target a strong
+  password, keep it on a trusted network, and check the share occasionally.
+  An SMB share mounted on the host and used as a `local` target does not have
+  this gap.
 - `local`: a directory, typically an NFS or SMB mount managed by the host.
 
 Credentials for every type are sealed with `secret.key` before they reach the

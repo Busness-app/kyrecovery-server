@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,9 @@ import (
 )
 
 const sftpUser, sftpPass = "ky", "correct-horse"
+
+// seenPasswords records every password the test server was offered.
+var seenPasswords []string
 
 // startSFTPServer runs a password-authenticated SSH server with the sftp
 // subsystem on a loopback port, serving the real filesystem.
@@ -35,6 +40,7 @@ func startSFTPServer(t *testing.T) (addr, fingerprint string) {
 	}
 	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			seenPasswords = append(seenPasswords, string(pw))
 			if c.User() == sftpUser && string(pw) == sftpPass {
 				return nil, nil
 			}
@@ -176,5 +182,58 @@ func TestSFTPUnpinnedTargetReportsFingerprint(t *testing.T) {
 	}
 	if unknown.Fingerprint != fp {
 		t.Fatalf("fingerprint %q, want %q", unknown.Fingerprint, fp)
+	}
+}
+
+func TestSFTPNeverSendsPrivateKeyAsPassword(t *testing.T) {
+	addr, fp := startSFTPServer(t)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A key pasted from a file often arrives with leading whitespace.
+	secret := "\n" + string(pem.EncodeToMemory(block))
+	seenPasswords = nil
+
+	client := replication.NewSFTPClient(addr, sftpUser, secret, t.TempDir(), fp)
+	_ = client.TestConnection(context.Background()) // auth fails: server has no pubkey callback
+	for _, pw := range seenPasswords {
+		if strings.Contains(pw, "PRIVATE KEY") {
+			t.Fatal("private key was offered to the server as a password")
+		}
+	}
+}
+
+// stalledListener accepts connections and never writes.
+func stalledListener(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() })
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestSFTPStalledServerReturnsWithinBudget(t *testing.T) {
+	client := replication.NewSFTPClient(stalledListener(t), sftpUser, sftpPass, "/x", "SHA256:x")
+	client.Timeout = 2 * time.Second
+	start := time.Now()
+	err := client.Put(context.Background(), "a.kycap", strings.NewReader("x"))
+	if err == nil {
+		t.Fatal("expected an error from a stalled server")
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatalf("took %s, budget was 2s", time.Since(start))
 	}
 }
