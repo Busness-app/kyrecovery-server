@@ -1117,6 +1117,17 @@ func (s *Server) handleReplicationTargets(w http.ResponseWriter, r *http.Request
 		if target.Type == "" {
 			target.Type = "s3"
 		}
+		if target.Type == "smb" {
+			// Before the defaults, so a pasted //host/share/dir fills blank
+			// fields. Endpoint is stored in cleartext and copied into the
+			// ledger, so smb://user:password@host is refused before either.
+			addr, share, dir, err := replication.ParseSMBEndpoint(target.Endpoint, target.Bucket, target.Prefix)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			target.Endpoint, target.Bucket, target.Prefix = addr, share, dir
+		}
 		if target.Region == "" {
 			target.Region = "us-east-1"
 		}
