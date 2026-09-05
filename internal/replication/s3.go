@@ -38,7 +38,7 @@ func NewS3Client(endpoint, bucket, region, accessKey, secretKey string) *S3Clien
 		Region:    region,
 		AccessKey: accessKey,
 		SecretKey: secretKey,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client:    &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/offsite"
 	"github.com/Busness-app/kyrecovery-server/internal/audit"
 	"github.com/Busness-app/kyrecovery-server/internal/auth"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
@@ -1137,6 +1138,10 @@ func (s *Server) handleReplicationTargets(w http.ResponseWriter, r *http.Request
 		if target.Status == "" {
 			target.Status = "active"
 		}
+		if err := replication.ValidateTarget(target); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		target.CreatedAt = time.Now().UTC()
 
 		if err := s.db.InsertReplicationTarget(ctx, target); err != nil {
@@ -1174,6 +1179,10 @@ func (s *Server) handleReplicationTargetTest(w http.ResponseWriter, r *http.Requ
 		resp := map[string]interface{}{"success": false, "error": err.Error()}
 		// An unpinned SFTP server is not a failure yet: hand back the fingerprint
 		// so the operator can pin it on purpose rather than trust it blindly.
+		var libraryUnknown *offsite.UnknownHostKeyError
+		if errors.As(err, &libraryUnknown) {
+			resp["host_key"] = libraryUnknown.Fingerprint
+		}
 		var unknown *replication.UnknownHostKeyError
 		if errors.As(err, &unknown) {
 			resp["host_key"] = unknown.Fingerprint

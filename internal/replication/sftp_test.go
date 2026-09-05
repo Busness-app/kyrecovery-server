@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,7 +34,7 @@ var (
 
 // startSFTPServer runs a password-authenticated SSH server with the sftp
 // subsystem on a loopback port, serving the real filesystem.
-func startSFTPServer(t *testing.T) (addr, fingerprint string) {
+func startSFTPServer(t *testing.T, roots ...string) (addr, fingerprint string) {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -84,7 +86,11 @@ func startSFTPServer(t *testing.T) (addr, fingerprint string) {
 							ok := req.Type == "subsystem" && len(req.Payload) >= 4 && string(req.Payload[4:]) == "sftp"
 							req.Reply(ok, nil)
 							if ok {
-								srv, err := sftp.NewServer(ch)
+								var opts []sftp.ServerOption
+								if len(roots) > 0 {
+									opts = append(opts, sftp.WithServerWorkingDirectory(roots[0]))
+								}
+								srv, err := sftp.NewServer(ch, opts...)
 								if err == nil {
 									srv.Serve()
 								}
@@ -116,7 +122,7 @@ func newCapsuleFixture(t *testing.T) (*db.DB, *replication.Manager, string) {
 	}
 	capRec := db.CapsuleRecord{
 		ID: "cap-sftp-1", ServiceName: "kysignon", FilePath: capFilePath, SizeBytes: 30,
-		PayloadHash: "abc", Threshold: 2, TotalShares: 3, Status: "active", CreatedAt: time.Now().UTC(),
+		Digest: fmt.Sprintf("%x", sha256.Sum256([]byte("mock-encrypted-capsule-content"))), PayloadHash: "abc", Threshold: 2, TotalShares: 3, Status: "active", CreatedAt: time.Now().UTC(),
 	}
 	if err := database.InsertCapsule(ctx, capRec); err != nil {
 		t.Fatal(err)
@@ -256,3 +262,49 @@ func TestSFTPStalledServerReturnsWithinBudget(t *testing.T) {
 		t.Fatalf("took %s, budget was 2s", time.Since(start))
 	}
 }
+
+func TestRelativeSFTPUsesSameAccountDirectory(t *testing.T) {
+	root := t.TempDir()
+	addr, fp := startSFTPServer(t, root)
+	database, mgr, id := newCapsuleFixture(t)
+	target := sftpTarget(addr, fp, "vault")
+	if err := database.InsertReplicationTarget(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.TestTarget(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := mgr.SyncCapsule(t.Context(), id, target.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(root, "vault", id+".kycap"))
+	if err != nil || string(data) != "mock-encrypted-capsule-content" {
+		t.Fatalf("wrong relative destination: %v", err)
+	}
+}
+
+func TestInterruptedAbsoluteSFTPPreservesReplica(t *testing.T) {
+	root := t.TempDir()
+	addr, fp := startSFTPServer(t)
+	client := replication.NewSFTPClient(addr, sftpUser, sftpPass, root, fp)
+	if err := client.Put(t.Context(), "cap-one.kycap", strings.NewReader("complete")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Put(t.Context(), "cap-one.kycap", failingSFTPReader{}); err == nil {
+		t.Fatal("interrupted transfer accepted")
+	}
+	data, err := os.ReadFile(filepath.Join(root, "cap-one.kycap"))
+	if err != nil || string(data) != "complete" {
+		t.Fatal("old replica lost")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("staging file leaked")
+	}
+}
+
+type failingSFTPReader struct{}
+
+func (failingSFTPReader) Read([]byte) (int, error) { return 0, errors.New("interrupted fixture") }

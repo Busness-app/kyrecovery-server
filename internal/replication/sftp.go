@@ -2,10 +2,12 @@ package replication
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -27,7 +29,8 @@ func (e *UnknownHostKeyError) Error() string {
 	return "host key not pinned; server presented " + e.Fingerprint
 }
 
-// SFTPClient uploads capsules over SSH. The server's host key must match the
+// SFTPClient preserves absolute-directory targets unsupported by offsite v0.1.0.
+// Relative-directory targets use the library. It uploads capsules over SSH. The server's host key must match the
 // pinned SHA256 fingerprint; a blank pin never connects.
 type SFTPClient struct {
 	Addr    string // host or host:port, port defaults to 22
@@ -122,8 +125,8 @@ func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error
 		return err
 	}
 	final := path.Join(c.Dir, name)
-	tmp := final + ".part"
-	f, err := client.Create(tmp)
+	tmp := path.Join(path.Dir(final), ".ky-offsite-compat-"+rand.Text())
+	f, err := client.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		return err
 	}
@@ -136,7 +139,11 @@ func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error
 		client.Remove(tmp)
 		return err
 	}
-	return client.PosixRename(tmp, final)
+	if err := client.PosixRename(tmp, final); err != nil {
+		client.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // TestConnection authenticates and proves Dir is writable.

@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/Busness-app/ky-primitives v0.4.1
+	github.com/Busness-app/ky-primitives/offsite v0.1.0
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/pkg/sftp v1.13.11
