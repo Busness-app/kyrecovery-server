@@ -9,7 +9,7 @@ KyRecovery Server is the self-hosted **blind store** for the KySecurity Suite (K
 3. **Zero-code product pairing**: ephemeral six-digit codes (`/api/pairing/*`). `POST /api/pairing/claim` returns the API token plus `recovery_public_key`, `threshold` and `total_shares`, and is refused `409` before the ceremony has run, without consuming the code.
 4. **Local admin bootstrap & KySignOn OIDC SSO**: local `admin` credentials on first start, PHC-format passwords via `ky-primitives/password`, SQLite session tokens, and an OIDC pairing portal with PKCE (`S256`). Every API route is authorized by `apiPolicy` in `internal/server/server.go` against `admin` > `operator` > `viewer`; SSO identities are verified against the issuer's JWKS before a session exists.
 5. **Integrity attestation**: `GET /api/capsules/{id}/verify` re-hashes the stored blob and appends `capsule_verified` or `capsule_corrupt`, flagging the row; a sweep does the same for every capsule every 24 hours. `GET /api/capsules/{id}/download` returns the bytes with `X-Capsule-Digest` and `X-Capsule-Status`.
-6. **Offsite replication (S3 / Cloudflare R2 / MinIO / local mounts)**: replicates stored containers to auto-sync targets with pure-Go SigV4 signing.
+6. **Offsite replication (S3 / Cloudflare R2 / MinIO / local mounts)**: replicates stored containers through `ky-primitives/offsite` v0.1.0. Absolute SFTP directories and S3 endpoints containing the bucket name retain compatibility clients to preserve existing destinations. SMB writes use `kycap-v1-<SHA-256 of exact capsule ID>.kycap`; a restricted read-only adapter finds historical mixed-case names only after canonical absence. Existing SMB replicas require matching size/digest before success. No historical objects are renamed. S3 requires HTTPS with no redirects.
 7. **Capsule diff & timeline inspector**: `internal/diff` computes drift across deposits from `capsules` rows — the recorded manifest fields — never by opening a container.
 8. **Hash-chained audit ledger**: `ky-primitives/auditchain`, keyed from the keyring, with the anchor (count, last hash) kept outside the log. `POST /api/audit/verify` returns `{valid, count, last_hash}` and `append_disabled` + `error` when the ledger is poisoned. A poisoned ledger refuses deposits with `503` until an operator repairs the log and restarts.
 9. **Privacy-safe structured logging**: `LOGGING.md` — structured JSON/logfmt to stdout/stderr, never secrets, keys or capsule contents.
@@ -25,12 +25,14 @@ KyRecovery Server is the self-hosted **blind store** for the KySecurity Suite (K
 | `internal/db` | SQLite schema and every query, including `capsules`, `recovery_key` and `paired_apps`. |
 | `internal/audit` | The ledger over `auditchain`, its anchor and health latch. |
 | `internal/pairing` | Pairing code generation and claim. |
-| `internal/replication` | Offsite targets and the SigV4 S3 client. |
+| `internal/replication` | Shared offsite adapter, product sync/audit ownership, and explicit legacy location compatibility clients. |
 | `internal/secrets` | The keyring: master key from `KYRECOVERY_SECRET_KEY` or `<data-dir>/secret.key` via `ky-primitives/keyfile`. |
 | `internal/crypto` | AES-256-GCM envelope used by the keyring, and nothing else. |
 | `internal/diff` | The capsule diff and timeline inspector. |
 | `pkg/client` | The product-side SDK: `ClaimPairing`, `Client.Deposit`. |
 | `scripts` | `build-wasm.sh` rebuilds the committed module byte-for-byte; `test-wasm.mjs` runs it under Node. |
+
+Absolute-SFTP compatibility uploads reconcile regular `.ky-offsite-compat-*` staging files before Put and connection tests, after the greater of the default/current transfer budget plus one minute. Recent files and unrelated names are preserved. Cleanup listing/removal errors are logged and do not block uploads or connection tests; transfer errors still fail the sync. SMB legacy names outside the admitted grammar count as absent, allowing canonical replication of any valid capsule ID.
 
 ## Security Invariants
 
@@ -97,3 +99,5 @@ node scripts/test-wasm.mjs
 
 ## Child DOX Index
 - `zero_code_pairing_handoff_spec.md`: the wire contract for pairing and deposit that this server exposes (`/api/pairing/generate`, `/api/pairing/claim`, `/api/backup/deposit`). A change here is breaking for every paired product; update their copies in the same change set.
+
+- `docs/plans/2026-09-05-offsite-migration.md`: migration plan and compatibility gates; read before removing the remaining absolute-SFTP, virtual-host-S3 or read-only SMB adapters.

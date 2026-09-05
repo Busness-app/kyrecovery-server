@@ -2,6 +2,9 @@ package replication_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
+	"github.com/Busness-app/ky-primitives/offsite"
 	"net"
 	"os"
 	"strings"
@@ -27,12 +30,12 @@ func smbTestTarget(t *testing.T) db.ReplicationTargetRecord {
 	parts := strings.SplitN(spec, "|", 3)
 	addrShare := strings.SplitN(parts[0], "/", 2)
 	if len(parts) != 3 || len(addrShare) != 2 {
-		t.Fatalf("KYRECOVERY_SMB_TEST must be host:port/share|user|password, got %q", spec)
+		t.Fatalf("KYRECOVERY_SMB_TEST must be host:port/share|user|password, invalid format")
 	}
 	return db.ReplicationTargetRecord{
 		ID: "target-smb-01", Name: "SMB Vault", Type: "smb",
 		Endpoint: addrShare[0], Bucket: addrShare[1], AccessKey: parts[1], SecretKey: parts[2],
-		Prefix: "kyrecovery-test/", AutoSync: true, Status: "active", CreatedAt: time.Now().UTC(),
+		Prefix: fmt.Sprintf("kyrecovery-test-%d/", time.Now().UnixNano()), AutoSync: true, Status: "active", CreatedAt: time.Now().UTC(),
 	}
 }
 
@@ -71,10 +74,65 @@ func TestSMBReplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer share.Umount()
-	data, err := share.ReadFile("kyrecovery-test/" + capID + ".kycap")
+	data, err := share.ReadFile(fmt.Sprintf("%skycap-v1-%x.kycap", target.Prefix, sha256.Sum256([]byte(capID))))
 	if err != nil || string(data) != "mock-encrypted-capsule-content" {
 		t.Fatalf("replicated file mismatch or missing: %v", err)
 	}
+	canonical := fmt.Sprintf("%skycap-v1-%x.kycap", target.Prefix, sha256.Sum256([]byte(capID)))
+	defer share.Remove(canonical)
+	// A duplicate is successful only while the existing object matches the receipt.
+	if _, err := mgr.SyncCapsule(ctx, capID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := share.WriteFile(canonical, []byte("wrong"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if log, err := mgr.SyncCapsule(ctx, capID, target.ID); err == nil || log.Status != "failed" {
+		t.Fatal("corrupt replica accepted")
+	}
+	if err := share.Remove(canonical); err != nil {
+		t.Fatal(err)
+	}
+	// A valid ID outside the legacy cap- namespace must reach the canonical writer.
+	generic, err := database.GetCapsule(ctx, capID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic.ID = "notes-backup-42"
+	if err := database.InsertCapsule(ctx, *generic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.SyncCapsule(ctx, generic.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	genericPath := fmt.Sprintf("%skycap-v1-%x.kycap", target.Prefix, sha256.Sum256([]byte(generic.ID)))
+	defer share.Remove(genericPath)
+	if data, err := share.ReadFile(genericPath); err != nil || string(data) != "mock-encrypted-capsule-content" {
+		t.Fatalf("non-legacy canonical write: %v", err)
+	}
+	// Mixed-case historical IDs remain readable without renaming historical objects.
+	rec, err := database.GetCapsule(ctx, capID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.ID = "cap-KySignOn-Legacy"
+	if err := database.InsertCapsule(ctx, *rec); err != nil {
+		t.Fatal(err)
+	}
+	legacy := target.Prefix + rec.ID + ".kycap"
+	if err := share.WriteFile(legacy, []byte("mock-encrypted-capsule-content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer share.Remove(legacy)
+	if _, err := mgr.SyncCapsule(ctx, rec.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	// No canonical duplicate was created for the verified historical replica.
+	mapped := fmt.Sprintf("%skycap-v1-%x.kycap", target.Prefix, sha256.Sum256([]byte(rec.ID)))
+	if _, err := share.Stat(mapped); !os.IsNotExist(err) {
+		t.Fatalf("historical replica duplicated: %v", err)
+	}
+
 }
 
 func TestSMBRejectsBadPassword(t *testing.T) {
@@ -87,10 +145,12 @@ func TestSMBRejectsBadPassword(t *testing.T) {
 }
 
 func TestSMBStalledServerReturnsWithinBudget(t *testing.T) {
-	client := replication.NewSMBClient(stalledListener(t), "vault", "ky", "pw", "dir")
-	client.Timeout = 2 * time.Second
+	client, err := offsite.Parse(offsite.Config{URL: "smb://" + stalledListener(t) + "/vault/dir", AccessKey: "ky", Secret: "pw", Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := time.Now()
-	err := client.Put(context.Background(), "a.kycap", strings.NewReader("x"))
+	err = client.Put(context.Background(), "a.kycap", strings.NewReader("x"), 1)
 	if err == nil {
 		t.Fatal("expected an error from a stalled server")
 	}
@@ -113,13 +173,16 @@ func TestNewSMBClientAcceptsUNCAndURLForms(t *testing.T) {
 		{"smb://nas.lan:1445/Public", "", "capsules"},
 	}
 	for _, c := range cases {
-		got := replication.NewSMBClient(c.endpoint, c.share, "ky", "pw", c.dir)
+		addr, share, dir, err := replication.ParseSMBEndpoint(c.endpoint, c.share, c.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
 		wantAddr := "nas.lan:445"
 		if strings.Contains(c.endpoint, "1445") {
 			wantAddr = "nas.lan:1445"
 		}
-		if got.Addr != wantAddr || got.Share != "Public" || got.Dir != "capsules" {
-			t.Errorf("%q share=%q dir=%q -> addr=%q share=%q dir=%q", c.endpoint, c.share, c.dir, got.Addr, got.Share, got.Dir)
+		if addr != wantAddr || share != "Public" || dir != "capsules" {
+			t.Errorf("%q share=%q dir=%q -> addr=%q share=%q dir=%q", c.endpoint, c.share, c.dir, addr, share, dir)
 		}
 	}
 }

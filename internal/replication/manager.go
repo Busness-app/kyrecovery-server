@@ -3,12 +3,10 @@ package replication
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/offsite"
 	"github.com/Busness-app/kyrecovery-server/internal/audit"
 	"github.com/Busness-app/kyrecovery-server/internal/db"
 )
@@ -47,42 +45,12 @@ func (m *Manager) SyncCapsule(ctx context.Context, capsuleID, targetID string) (
 	}
 	defer capFile.Close()
 
-	stat, _ := capFile.Stat()
-	sizeBytes := stat.Size()
-
-	var transferErr error
-
-	switch target.Type {
-	case "s3":
-		s3Client := NewS3Client(target.Endpoint, target.Bucket, target.Region, target.AccessKey, target.SecretKey)
-		key := fmt.Sprintf("%s%s.kycap", strings.TrimPrefix(target.Prefix, "/"), capRec.ID)
-		transferErr = s3Client.PutObject(ctx, key, capFile, sizeBytes, "application/octet-stream")
-
-	case "sftp":
-		client := NewSFTPClient(target.Endpoint, target.AccessKey, target.SecretKey, target.Prefix, target.HostKey)
-		transferErr = client.Put(ctx, capRec.ID+".kycap", capFile)
-
-	case "smb":
-		client := NewSMBClient(target.Endpoint, target.Bucket, target.AccessKey, target.SecretKey, target.Prefix)
-		transferErr = client.Put(ctx, capRec.ID+".kycap", capFile)
-
-	case "local":
-		destPath := filepath.Join(target.Endpoint, fmt.Sprintf("%s.kycap", capRec.ID))
-		if err := os.MkdirAll(filepath.Dir(destPath), 0700); err != nil {
-			transferErr = err
-		} else {
-			destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-			if err != nil {
-				transferErr = err
-			} else {
-				_, transferErr = io.Copy(destFile, capFile)
-				destFile.Close()
-			}
-		}
-
-	default:
-		transferErr = fmt.Errorf("unsupported replication target type: %s", target.Type)
+	stat, err := capFile.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat capsule: %w", err)
 	}
+	sizeBytes := stat.Size()
+	transferErr := m.transfer(ctx, *target, capRec, capFile, sizeBytes)
 
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(startedAt).Milliseconds()
@@ -144,25 +112,19 @@ func (m *Manager) SyncAllAutoTargets(ctx context.Context, capsuleID string) []db
 
 // TestTarget validates connectivity and credentials for a target.
 func (m *Manager) TestTarget(ctx context.Context, target db.ReplicationTargetRecord) error {
-	switch target.Type {
-	case "s3":
-		s3Client := NewS3Client(target.Endpoint, target.Bucket, target.Region, target.AccessKey, target.SecretKey)
-		return s3Client.TestConnection(ctx)
-	case "sftp":
-		return NewSFTPClient(target.Endpoint, target.AccessKey, target.SecretKey, target.Prefix, target.HostKey).TestConnection(ctx)
-	case "smb":
-		return NewSMBClient(target.Endpoint, target.Bucket, target.AccessKey, target.SecretKey, target.Prefix).TestConnection(ctx)
-	case "local":
-		if err := os.MkdirAll(target.Endpoint, 0700); err != nil {
-			return err
-		}
-		testFile := filepath.Join(target.Endpoint, ".kyrecovery-ping")
-		if err := os.WriteFile(testFile, []byte("ping"), 0600); err != nil {
-			return err
-		}
-		_ = os.Remove(testFile)
-		return nil
-	default:
-		return fmt.Errorf("unsupported target type: %s", target.Type)
+	l, err := targetLocation(target, "connectivity-test")
+	if err != nil {
+		return err
 	}
+	if l.absoluteSFTP {
+		return NewSFTPClient(target.Endpoint, target.AccessKey, target.SecretKey, target.Prefix, target.HostKey).TestConnection(ctx)
+	}
+	if l.virtualS3 {
+		return NewS3Client(target.Endpoint, target.Bucket, target.Region, target.AccessKey, target.SecretKey).TestConnection(ctx)
+	}
+	t, err := offsite.Parse(l.config)
+	if err != nil {
+		return err
+	}
+	return t.Test(ctx)
 }

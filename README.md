@@ -111,6 +111,27 @@ here. Target types:
 Credentials for every type are sealed with `secret.key` before they reach the
 database.
 
+Replication uses `ky-primitives/offsite` v0.1.0 for local, ordinary S3,
+account-relative SFTP, and new SMB writes. Existing absolute SFTP directories and
+S3 endpoints containing the bucket name retain compatibility clients because the
+released library cannot express their original locations. Those branches preserve
+existing paths; they are not evidence that transport duplication is fully removed.
+S3 endpoints must be HTTPS and redirects are refused on both paths. New target
+records are validated before persistence; credentials belong in dedicated fields.
+
+New SMB replicas use `kycap-v1-<SHA-256 of exact capsule ID>.kycap` beneath the
+configured prefix. The hash uses the ID's original case and UTF-8 bytes, encoded
+as lowercase hexadecimal. Historical `<capsule-id>.kycap` files are read through a
+restricted, read-only compatibility adapter, after the canonical path is genuinely
+absent. They are never renamed. Existing replicas count as successful only when
+both size and SHA-256 match the local capsule receipt; a mismatch refuses the sync.
+A rollback binary can still find historical names but cannot discover new hashed
+SMB names automatically: retain this mapping with recovery instructions.
+
+The opt-in `KYRECOVERY_SMB_TEST` tests verify new names, historical mixed-case
+lookup, duplicate success and corruption refusal against a real Samba share. This
+fixture does not substitute for an operator-observed sync to an existing target.
+
 ## Integrity
 
 - `GET /api/capsules/{id}/verify` (viewer) re-reads the blob, compares its
