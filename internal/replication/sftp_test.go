@@ -308,3 +308,76 @@ func TestInterruptedAbsoluteSFTPPreservesReplica(t *testing.T) {
 type failingSFTPReader struct{}
 
 func (failingSFTPReader) Read([]byte) (int, error) { return 0, errors.New("interrupted fixture") }
+
+func TestSFTPStagingReaped(t *testing.T) {
+	for _, testConnection := range []bool{false, true} {
+		t.Run(fmt.Sprint(testConnection), func(t *testing.T) {
+			root := t.TempDir()
+			addr, fp := startSFTPServer(t)
+			client := replication.NewSFTPClient(addr, sftpUser, sftpPass, root, fp)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			err := client.Put(ctx, "cap-one.kycap", &cancelingSFTPReader{cancel: cancel})
+			if err == nil {
+				t.Fatal("canceled transfer succeeded")
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			orphan := ""
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".ky-offsite-compat-") {
+					orphan = filepath.Join(root, entry.Name())
+				}
+			}
+			if orphan == "" {
+				t.Fatal("fixture did not leave an orphan on the closed session")
+			}
+			old := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(orphan, old, old); err != nil {
+				t.Fatal(err)
+			}
+			recent := filepath.Join(root, ".ky-offsite-compat-recent")
+			unrelated := filepath.Join(root, "unrelated")
+			for _, name := range []string{recent, unrelated} {
+				if err := os.WriteFile(name, []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if testConnection {
+				err = client.TestConnection(t.Context())
+			} else {
+				err = client.Put(t.Context(), "cap-one.kycap", strings.NewReader("complete"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+				t.Fatalf("orphan not reaped: %v", err)
+			}
+			for _, name := range []string{recent, unrelated} {
+				if _, err := os.Stat(name); err != nil {
+					t.Fatal("live or unrelated file removed")
+				}
+			}
+		})
+	}
+}
+
+type cancelingSFTPReader struct {
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (r *cancelingSFTPReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, "partial"), nil
+	}
+	r.cancel()
+	// Allow the registered cancellation callback to close the network session,
+	// rather than exercising only the live-connection reader-error cleanup.
+	time.Sleep(100 * time.Millisecond)
+	return 0, context.Canceled
+}

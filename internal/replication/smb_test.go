@@ -93,6 +93,23 @@ func TestSMBReplication(t *testing.T) {
 	if err := share.Remove(canonical); err != nil {
 		t.Fatal(err)
 	}
+	// A valid ID outside the legacy cap- namespace must reach the canonical writer.
+	generic, err := database.GetCapsule(ctx, capID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generic.ID = "notes-backup-42"
+	if err := database.InsertCapsule(ctx, *generic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.SyncCapsule(ctx, generic.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	genericPath := fmt.Sprintf("%skycap-v1-%x.kycap", target.Prefix, sha256.Sum256([]byte(generic.ID)))
+	defer share.Remove(genericPath)
+	if data, err := share.ReadFile(genericPath); err != nil || string(data) != "mock-encrypted-capsule-content" {
+		t.Fatalf("non-legacy canonical write: %v", err)
+	}
 	// Mixed-case historical IDs remain readable without renaming historical objects.
 	rec, err := database.GetCapsule(ctx, capID)
 	if err != nil {

@@ -32,6 +32,8 @@ KyRecovery Server is the self-hosted **blind store** for the KySecurity Suite (K
 | `pkg/client` | The product-side SDK: `ClaimPairing`, `Client.Deposit`. |
 | `scripts` | `build-wasm.sh` rebuilds the committed module byte-for-byte; `test-wasm.mjs` runs it under Node. |
 
+Absolute-SFTP compatibility uploads reconcile regular `.ky-offsite-compat-*` staging files before Put and connection tests, after the greater of the default/current transfer budget plus one minute. Recent files and unrelated names are preserved. SMB legacy names outside the admitted grammar count as absent, allowing canonical replication of any valid capsule ID.
+
 ## Security Invariants
 
 - **Nothing in the server decrypts.** `recoverykey.Generate/Split/Combine/FromSeed`, `capsule.Open`, `capsule.Seal` and `hpke.NewRecipient` may not appear in any non-test `.go` file outside `cmd/ceremony-wasm`. `TestNothingInTheServerDecrypts` walks the repo and fails if one does. Do not weaken it to land a feature.

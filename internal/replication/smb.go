@@ -94,7 +94,8 @@ var legacySMBName = regexp.MustCompile(`^cap-[A-Za-z0-9_.-]+\.kycap$`)
 
 func (c *legacySMBClient) get(ctx context.Context, name string) (io.ReadCloser, error) {
 	if !legacySMBName.MatchString(name) {
-		return nil, fmt.Errorf("invalid legacy capsule name")
+		// Outside the legacy namespace: the canonical writer may still accept it.
+		return nil, os.ErrNotExist
 	}
 	ctx, cancel := c.budget(ctx)
 	share, cleanup, err := c.mount(ctx)

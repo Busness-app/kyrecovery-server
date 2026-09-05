@@ -185,3 +185,17 @@ func TestInterruptedLocalPutPreservesReplica(t *testing.T) {
 type brokenReader struct{}
 
 func (brokenReader) Read([]byte) (int, error) { return 0, errors.New("interrupted fixture") }
+
+func TestLegacySMBLookup(t *testing.T) {
+	c := newLegacySMB(db.ReplicationTargetRecord{Endpoint: "127.0.0.1:1", Bucket: "vault"})
+	for _, name := range []string{"backup-123.kycap", "notes.kycap", "../cap-x.kycap", "cap-x:stream.kycap"} {
+		if _, err := c.get(t.Context(), name); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%q: want absent without dial, got %v", name, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := c.get(ctx, "cap-Notes-123.kycap"); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy name should reach lookup: %v", err)
+	}
+}

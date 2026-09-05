@@ -110,6 +110,26 @@ func (c *SFTPClient) budget(ctx context.Context) (context.Context, context.Cance
 	return context.WithTimeout(ctx, t)
 }
 
+// Reconcile abandoned compatibility uploads after their maximum expected lifetime.
+// Keep at least the production budget even when a caller uses a shorter timeout,
+// plus a grace minute for timestamp precision and teardown. Recent files may belong
+// to another concurrent sync and must remain untouched.
+func (c *SFTPClient) reapStaging(client *sftp.Client) error {
+	entries, err := client.ReadDir(c.Dir)
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-max(defaultTransferBudget, c.Timeout) - time.Minute)
+	for _, entry := range entries {
+		if entry.Mode().IsRegular() && strings.HasPrefix(entry.Name(), ".ky-offsite-compat-") && entry.ModTime().Before(cutoff) {
+			if err := client.Remove(path.Join(c.Dir, entry.Name())); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Put streams data to Dir/name, creating Dir if needed. The bytes land in a
 // temporary name and are renamed into place, so an aborted transfer never
 // replaces a complete replica with a short one.
@@ -122,6 +142,9 @@ func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error
 	}
 	defer cleanup()
 	if err := client.MkdirAll(c.Dir); err != nil {
+		return err
+	}
+	if err := c.reapStaging(client); err != nil {
 		return err
 	}
 	final := path.Join(c.Dir, name)
@@ -156,6 +179,9 @@ func (c *SFTPClient) TestConnection(ctx context.Context) error {
 	}
 	defer cleanup()
 	if err := client.MkdirAll(c.Dir); err != nil {
+		return err
+	}
+	if err := c.reapStaging(client); err != nil {
 		return err
 	}
 	probe := path.Join(c.Dir, ".kyrecovery-ping")
