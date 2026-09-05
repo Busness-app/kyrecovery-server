@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/kyrecovery-server/internal/audit"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
@@ -113,21 +114,22 @@ func (c *SFTPClient) budget(ctx context.Context) (context.Context, context.Cance
 // Reconcile abandoned compatibility uploads after their maximum expected lifetime.
 // Keep at least the production budget even when a caller uses a shorter timeout,
 // plus a grace minute for timestamp precision and teardown. Recent files may belong
-// to another concurrent sync and must remain untouched.
-func (c *SFTPClient) reapStaging(client *sftp.Client) error {
+// to another concurrent sync and must remain untouched. Housekeeping is best-effort:
+// drop-box targets can allow writes without listing or deleting existing files.
+func (c *SFTPClient) reapStaging(client *sftp.Client) {
 	entries, err := client.ReadDir(c.Dir)
 	if err != nil {
-		return err
+		audit.Log().Error("sftp_staging_cleanup", "replication-daemon", "", "Could not list staging files; continuing transfer", err)
+		return
 	}
 	cutoff := time.Now().Add(-max(defaultTransferBudget, c.Timeout) - time.Minute)
 	for _, entry := range entries {
 		if entry.Mode().IsRegular() && strings.HasPrefix(entry.Name(), ".ky-offsite-compat-") && entry.ModTime().Before(cutoff) {
 			if err := client.Remove(path.Join(c.Dir, entry.Name())); err != nil && !os.IsNotExist(err) {
-				return err
+				audit.Log().Error("sftp_staging_cleanup", "replication-daemon", "", "Could not remove expired staging file; continuing transfer", err)
 			}
 		}
 	}
-	return nil
 }
 
 // Put streams data to Dir/name, creating Dir if needed. The bytes land in a
@@ -144,9 +146,7 @@ func (c *SFTPClient) Put(ctx context.Context, name string, data io.Reader) error
 	if err := client.MkdirAll(c.Dir); err != nil {
 		return err
 	}
-	if err := c.reapStaging(client); err != nil {
-		return err
-	}
+	c.reapStaging(client)
 	final := path.Join(c.Dir, name)
 	tmp := path.Join(path.Dir(final), ".ky-offsite-compat-"+rand.Text())
 	f, err := client.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
@@ -181,9 +181,7 @@ func (c *SFTPClient) TestConnection(ctx context.Context) error {
 	if err := client.MkdirAll(c.Dir); err != nil {
 		return err
 	}
-	if err := c.reapStaging(client); err != nil {
-		return err
-	}
+	c.reapStaging(client)
 	probe := path.Join(c.Dir, ".kyrecovery-ping")
 	f, err := client.Create(probe)
 	if err != nil {

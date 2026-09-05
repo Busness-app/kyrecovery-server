@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,6 +36,10 @@ var (
 // startSFTPServer runs a password-authenticated SSH server with the sftp
 // subsystem on a loopback port, serving the real filesystem.
 func startSFTPServer(t *testing.T, roots ...string) (addr, fingerprint string) {
+	return startSFTPServerWithHandlers(t, nil, roots...)
+}
+
+func startSFTPServerWithHandlers(t *testing.T, handlers *sftp.Handlers, roots ...string) (addr, fingerprint string) {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -86,6 +91,12 @@ func startSFTPServer(t *testing.T, roots ...string) (addr, fingerprint string) {
 							ok := req.Type == "subsystem" && len(req.Payload) >= 4 && string(req.Payload[4:]) == "sftp"
 							req.Reply(ok, nil)
 							if ok {
+								if handlers != nil {
+									srv := sftp.NewRequestServer(ch, *handlers)
+									_ = srv.Serve()
+									_ = srv.Close()
+									return
+								}
 								var opts []sftp.ServerOption
 								if len(roots) > 0 {
 									opts = append(opts, sftp.WithServerWorkingDirectory(roots[0]))
@@ -381,3 +392,116 @@ func (r *cancelingSFTPReader) Read(p []byte) (int, error) {
 	time.Sleep(100 * time.Millisecond)
 	return 0, context.Canceled
 }
+
+func TestSFTPStagingUnlistableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0300); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(root, 0700)
+	addr, fp := startSFTPServer(t)
+	client := replication.NewSFTPClient(addr, sftpUser, sftpPass, root, fp)
+	if err := client.TestConnection(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Put(t.Context(), "cap-one.kycap", strings.NewReader("sealed")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "cap-one.kycap"))
+	if err != nil || string(data) != "sealed" {
+		t.Fatal("upload failed")
+	}
+}
+
+// The SFTP server denies removal of an old file, as a sticky shared directory
+// can, while retaining create/rename permissions. Protocol injection avoids
+// requiring root/chown or immutable-file capabilities on the test machine.
+func TestSFTPStagingUnremovableEntry(t *testing.T) {
+	handlers := sftp.InMemHandler()
+	denied := &denyStagingRemove{FileCmder: handlers.FileCmd}
+	handlers.FileCmd = denied
+	handlers.FileList = oldStagingList{handlers.FileList}
+	addr, fp := startSFTPServerWithHandlers(t, &handlers)
+	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: sftpUser, Auth: []ssh.AuthMethod{ssh.Password(sftpPass)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	remote, err := sftp.NewClient(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	if err := remote.MkdirAll("/vault"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := remote.Create("/vault/.ky-offsite-compat-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	client := replication.NewSFTPClient(addr, sftpUser, sftpPass, "/vault", fp)
+	if err := client.TestConnection(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Put(t.Context(), "cap-one.kycap", strings.NewReader("sealed")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := remote.Open("/vault/cap-one.kycap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Close()
+	data, err := io.ReadAll(result)
+	if err != nil || string(data) != "sealed" {
+		t.Fatal("upload failed")
+	}
+	denied.mu.Lock()
+	attempts := denied.attempts
+	denied.mu.Unlock()
+	if attempts != 2 {
+		t.Fatalf("expected two denied cleanup attempts, got %d", attempts)
+	}
+}
+
+type denyStagingRemove struct {
+	sftp.FileCmder
+	mu       sync.Mutex
+	attempts int
+}
+
+func (d *denyStagingRemove) Filecmd(r *sftp.Request) error {
+	if r.Method == "Remove" && strings.Contains(r.Filepath, ".ky-offsite-compat-") {
+		d.mu.Lock()
+		d.attempts++
+		d.mu.Unlock()
+		return os.ErrPermission
+	}
+	return d.FileCmder.Filecmd(r)
+}
+
+type oldStagingList struct{ sftp.FileLister }
+
+func (l oldStagingList) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	base, err := l.FileLister.Filelist(r)
+	return agedStaging{base}, err
+}
+
+type agedStaging struct{ sftp.ListerAt }
+
+func (l agedStaging) ListAt(dst []os.FileInfo, offset int64) (int, error) {
+	n, err := l.ListerAt.ListAt(dst, offset)
+	for i := 0; i < n; i++ {
+		if strings.HasPrefix(dst[i].Name(), ".ky-offsite-compat-") {
+			dst[i] = oldStagingInfo{dst[i]}
+		}
+	}
+	return n, err
+}
+
+type oldStagingInfo struct{ os.FileInfo }
+
+func (oldStagingInfo) ModTime() time.Time { return time.Now().Add(-time.Hour) }
