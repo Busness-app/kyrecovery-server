@@ -292,6 +292,10 @@ func TestEmbeddedDashboardEscapesEveryInnerHTMLSink(t *testing.T) {
 	// a numeric coercion, a date, or a URL component.
 	safe := regexp.MustCompile(`^\s*(esc|escJs|Number|encodeURIComponent)\(|^\s*[a-zA-Z_.]+\s*(===|!==|\?)|^\s*\(|^\s*pct\b|^\s*color\b|^\s*pillClass\b|^\s*checksHtml\b|^\s*participantsStr\b|^\s*optionsHTML\b|^\s*new Date\(`)
 
+	// Inside an on*="..." handler the browser HTML-decodes the attribute before parsing it
+	// as script, so esc() is the wrong escaper there: a decoded quote ends the JS string.
+	inlineHandler := regexp.MustCompile(`\bon[a-z]+="[^"]*\$\{\s*esc\(`)
+
 	templates := htmlTemplates(js)
 	if len(templates) < 7 {
 		t.Fatalf("only found %d HTML templates; the scanner is not reading the file it thinks it is", len(templates))
@@ -301,6 +305,9 @@ func TestEmbeddedDashboardEscapesEveryInnerHTMLSink(t *testing.T) {
 			if !safe.MatchString(expr) {
 				t.Errorf("unescaped value interpolated into an HTML template: ${%s}", expr)
 			}
+		}
+		if m := inlineHandler.FindString(block); m != "" {
+			t.Errorf("HTML-escaped value inside an inline event handler; use escJs or a data attribute: %s", m)
 		}
 	}
 }

@@ -244,7 +244,7 @@ async function loadPairing() {
     const list = await res.json() || [];
 
     if (list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim);">No paired products yet. Create a pairing code and enter it in a KySecurity product.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-dim);">No paired products yet. Create a pairing code and enter it in a KySecurity product.</td></tr>';
       return;
     }
 
@@ -266,11 +266,48 @@ async function loadPairing() {
         <td>
           <div style="font-size: 12px;">${p.status === 'paired' && p.paired_at ? new Date(p.paired_at).toLocaleString() : 'Expires ' + new Date(p.expires_at).toLocaleTimeString()}</div>
         </td>
+        <td class="admin-only" style="display:none; text-align:right;">
+          ${p.status === 'revoked' ? '' : `<button class="btn btn-danger btn-sm revoke-pairing" data-id="${esc(p.id)}" data-app-name="${esc(p.app_name)}">Revoke</button>`}
+        </td>
       </tr>
     `).join('');
+    // Bound here rather than inline: app_name is chosen by whoever claims a code, so it
+    // never goes inside a script string.
+    tbody.querySelectorAll('.revoke-pairing').forEach(btn => {
+      btn.addEventListener('click', () => revokePairing(btn.dataset.id, btn.dataset.appName));
+    });
+    applyAdminOnly();
   } catch (err) {
     console.error('Error fetching pairing list:', err);
   }
+}
+
+// Revoking ends a product's deposits: its token is refused from the next request on. The
+// capsules it already deposited stay. The product side keeps its pairing record until its
+// admin unpairs there, so tell them.
+async function revokePairing(id, appName) {
+  if (!confirm(`Revoke ${appName}'s pairing?\n\nIts deposits will be refused from now on. Capsules already held are kept. Unpair on the product's Disaster recovery screen as well, or its scheduled backups will keep failing.`)) return;
+  try {
+    const res = await fetch('/api/pairing/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || `Revoke failed (HTTP ${res.status})`);
+      return;
+    }
+    await loadPairing();
+    if (typeof loadAudit === 'function') loadAudit();
+  } catch (err) {
+    console.error('Error revoking pairing:', err);
+  }
+}
+
+let isAdminUser = false;
+function applyAdminOnly() {
+  document.querySelectorAll('.admin-only').forEach(el => { el.style.display = isAdminUser ? '' : 'none'; });
 }
 
 function openPairingGenModal() {
@@ -355,6 +392,8 @@ async function loadAuthUser() {
         btn.className = 'btn btn-secondary btn-sm';
       }
       if (btnSSOPair) btnSSOPair.style.display = data.user.role === 'admin' ? 'inline-flex' : 'none';
+      isAdminUser = data.user.role === 'admin';
+      applyAdminOnly();
       if (btnChangePass) btnChangePass.style.display = 'inline-flex';
 
       if (loginGateway) loginGateway.style.display = 'none';
